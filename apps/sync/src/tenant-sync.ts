@@ -1,19 +1,43 @@
 // TenantSync: one Durable Object per (tenant, env), holding the kairos-sync database (§12.1). Phase 0 skeleton:
-// read-only polling of BookingVendor and ShiftTool through the gateway into raw snapshots, and signed, deduplicated
-// inbound events. Mirror ingestion into TenantCore (`mirrorApply`), drift rules and shadow mode come in Phase 1.
+// polling of BookingVendor and ShiftTool through the gateway into raw snapshots, signed and deduplicated inbound
+// events, and mirror ingestion of BookingVendor classes into TenantCore (`mirrorApply`, §12.1). Shadow mode and the
+// other entities' ingestion come later in Phase 1.
 import { DurableObject } from 'cloudflare:workers';
-import { ScopeGuard, type Scope } from '@kairos/core';
+import { ScopeGuard, type MirrorClass, type MirrorResult, type Scope, type TenantCore } from '@kairos/core';
 import { applyMigrations, canonicalJson, createDb, sha256Hex, type Db, type Migration } from '@kairos/db';
 import { Scheduler, type TickSource } from '@kairos/scheduler';
 import sync0001 from '../migrations/0001_sync.sql';
-import { ADAPTERS, readPage, type GatewayEnv } from './adapters';
+import { ADAPTERS, readPage, type GatewayEnv, type OutsideRecord } from './adapters';
 
 export const syncMigrations: readonly Migration[] = [{ id: '0001_sync', sql: sync0001 }];
 
 export const INBOUND_DEDUPE_MS = 7 * 86_400_000;   // §12.6
 const MAX_PAGES_PER_POLL = 20;
 
-export interface SyncEnv extends GatewayEnv {}
+export interface SyncEnv extends GatewayEnv {
+  /** The tenant's core objects, for mirror ingestion (§12.1: kairos-sync writes through kairos-core's API). */
+  TENANT_CORE?: DurableObjectNamespace<TenantCore>;
+}
+
+/** The normalised BookingVendor class record the gateway returns (`data` of each record). */
+interface BvClass {
+  template_key: string;
+  location_key: string;
+  room_key?: string | null;
+  start: number;
+  end: number;
+  status?: 'scheduled' | 'cancelled';
+  teacher?: { external_id: string; email?: string | null; name: string } | null;
+}
+
+const toMirrorClass = (r: OutsideRecord): MirrorClass => {
+  const d = r.data as unknown as BvClass;
+  return {
+    external_id: r.external_id, template_key: d.template_key, location_key: d.location_key, room_key: d.room_key ?? null,
+    start: d.start, end: d.end, status: d.status ?? 'scheduled',
+    teacher: d.teacher ? { external_id: d.teacher.external_id, email: d.teacher.email ?? null, name: d.teacher.name } : null,
+  };
+};
 
 export interface PollReport {
   system: string;
@@ -99,6 +123,16 @@ export class TenantSync extends DurableObject<SyncEnv> {
     try {
       for (let page = 0; page < MAX_PAGES_PER_POLL; page++) {
         const p = await readPage(this.env, this.knownScope(), system, entity, cursor);
+        // classes are written into TenantCore before their snapshots: if that fails, the next poll sees them as changed
+        const fresh = this.db.tx((tx) => p.records.filter((r) =>
+          tx.maybe<{ content_hash: string }>('SELECT content_hash FROM raw_snapshot WHERE system = ? AND entity_type = ? AND external_id = ?',
+            system, entity, r.external_id)?.content_hash !== sha256Hex(canonicalJson(r.data))));
+        if (system === 'booking_vendor' && entity === 'classes' && fresh.length && this.env.TENANT_CORE) {
+          const scope = this.knownScope();
+          const core = this.env.TENANT_CORE.get(this.env.TENANT_CORE.idFromName(`${scope.tenant}:${scope.env}`));
+          const res = await core.mirrorApply(scope, fresh.map(toMirrorClass));
+          this.recordDrift(system, res, now);
+        }
         // one transaction per page: snapshots and the cursor advance together
         changed += this.db.tx((tx) => {
           let c = 0;
@@ -136,6 +170,23 @@ export class TenantSync extends DurableObject<SyncEnv> {
          WHERE system = ? AND entity_type = ?`, error, now, def.pollEveryMs, system, entity));
       return { system, entity, records, changed, error };
     }
+  }
+
+  /** Drift from mirror ingestion (§18.5): cross-domain conflicts and unmapped teachers are manual items. */
+  private recordDrift(system: string, res: MirrorResult, now: number): void {
+    this.db.tx((tx) => {
+      const add = (kind: string, externalId: string, detail: unknown) => tx.run(
+        `INSERT INTO drift_item (id, kind, system, entity_type, external_id, detail, state, created_at)
+         VALUES (?, ?, ?, 'classes', ?, ?, 'open', ?) ON CONFLICT DO NOTHING`,
+        `drf_${crypto.randomUUID().replaceAll('-', '')}`, kind, system, externalId, canonicalJson(detail), now);
+      for (const c of res.conflicts) add('cross_domain_conflict', c.external_id, c);
+      for (const u of res.unmapped) add('unmapped_person', u.external_id, u);
+    });
+  }
+
+  async drift(scope: Scope): Promise<{ id: string; kind: string; external_id: string | null; detail: string; created_at: number }[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => tx.all(`SELECT id, kind, external_id, detail, created_at FROM drift_item WHERE state = 'open' ORDER BY created_at DESC LIMIT 200`));
   }
 
   private pollSource(): TickSource {

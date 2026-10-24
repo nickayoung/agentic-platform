@@ -7,3 +7,4 @@ export type { Slot, CoverageGap, AssignInput } from './shifts';
 export type { MirrorClass, MirrorResult, ClassRow } from './mirror';
 export type { HoursRow, ExportResult } from './hours';
 export type { DirectoryPerson, PersonRow } from './resources';
+export { addDays, fromLocal, toLocal, weekdayOf, weekStartOf } from './time';

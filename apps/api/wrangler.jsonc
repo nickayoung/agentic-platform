@@ -14,10 +14,14 @@
       "vars": {
         "ENVIRONMENT": "preview",
         "DEV_IDP_HOST": "kairos-dev-idp.lucky-shadow-edb4.workers.dev",
-        "CONSOLE_ORIGINS": "http://localhost:3000"
+        "CONSOLE_ORIGINS": "http://localhost:3000",
+        "GATEWAY_URL": "https://kairos-dev-gateway.lucky-shadow-edb4.workers.dev"
       },
       // preview only: the demo sign-in service (apps/dev-idp)
-      "services": [{ "binding": "DEV_IDP", "service": "kairos-dev-idp" }],
+      "services": [
+        { "binding": "DEV_IDP", "service": "kairos-dev-idp" },
+        { "binding": "GATEWAY", "service": "kairos-dev-gateway" }
+      ],
       "triggers": { "crons": ["*/5 * * * *"] },
       "durable_objects": {
         "bindings": [

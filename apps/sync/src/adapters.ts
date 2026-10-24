@@ -29,6 +29,8 @@ export const ADAPTERS: readonly AdapterDef[] = [
 export interface GatewayEnv {
   GATEWAY_URL?: string;
   SERVICE_TOKEN?: string;
+  /** Preview only: the demo gateway Worker, bound because Workers can't fetch each other over workers.dev. */
+  GATEWAY?: Fetcher;
 }
 
 export const READ_TIMEOUT_MS = 5_000;   // §7.12
@@ -37,7 +39,7 @@ export async function readPage(env: GatewayEnv, scope: { tenant: string; env: st
   if (!env.GATEWAY_URL) throw new Error('GATEWAY_URL is not set');
   const url = new URL(`${env.GATEWAY_URL}/${system}/${entity}`);
   if (cursor) url.searchParams.set('cursor', cursor);
-  const res = await globalThis.fetch(url, {
+  const res = await (env.GATEWAY ? env.GATEWAY.fetch.bind(env.GATEWAY) : globalThis.fetch)(url, {
     headers: { authorization: `Bearer ${env.SERVICE_TOKEN ?? ''}`, 'x-kairos-tenant': scope.tenant, 'x-kairos-env': scope.env },
     signal: AbortSignal.timeout(READ_TIMEOUT_MS),
   });

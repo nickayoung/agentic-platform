@@ -10,6 +10,7 @@ import { verifySignature } from '@kairos/sync';
 import { authenticate, requireRole, sameSecret } from './auth';
 import { callCtx, coreStub, syncStub, type AppEnv } from './context';
 import { configRoutes } from './routes/config';
+import { mvpRoutes } from './routes/mvp';
 import { errors, TenantParams } from './schemas';
 import { controlStub, type Env } from './env';
 import { problem } from './problem';
@@ -78,7 +79,7 @@ export function buildApp() {
     origin: (o) => ((c.env.CONSOLE_ORIGINS ?? '').split(',').map((s) => s.trim()).includes(o) ? o : null),
     allowHeaders: ['authorization', 'content-type', 'if-match', 'idempotency-key', 'x-request-id'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    exposeHeaders: ['etag', 'x-request-id'],
+    exposeHeaders: ['etag', 'x-request-id', 'content-disposition', 'x-kairos-unapproved'],
     maxAge: 600,
   })(c, next));
   app.use('*', async (c, next) => {
@@ -198,6 +199,7 @@ export function buildApp() {
   );
 
   configRoutes(app);
+  mvpRoutes(app);
 
   app.doc31('/v1/openapi.json', { openapi: '3.1.0', info: { title: 'Kairos API', version: '0.1.0' } });
   return app;
