@@ -5,5 +5,5 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "vars": { "TENANT_ID": "ten_11bd65238ec747b5b8918a584831ea48", "ALLOWED_ORIGINS": "http://localhost:3000" }
+  "vars": { "TENANT_ID": "ten_11bd65238ec747b5b8918a584831ea48", "ALLOWED_ORIGINS": "http://localhost:3000,https://kairos-console.lucky-shadow-edb4.workers.dev" }
 }

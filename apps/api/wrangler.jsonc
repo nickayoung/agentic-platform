@@ -14,7 +14,7 @@
       "vars": {
         "ENVIRONMENT": "preview",
         "DEV_IDP_HOST": "kairos-dev-idp.lucky-shadow-edb4.workers.dev",
-        "CONSOLE_ORIGINS": "http://localhost:3000",
+        "CONSOLE_ORIGINS": "http://localhost:3000,https://kairos-console.lucky-shadow-edb4.workers.dev",
         "GATEWAY_URL": "https://kairos-dev-gateway.lucky-shadow-edb4.workers.dev"
       },
       // preview only: the demo sign-in service (apps/dev-idp)

@@ -4,6 +4,7 @@ A first slice of Phase 1 (§15), running on Cloudflare in the **preview** enviro
 
 | What | Where |
 |---|---|
+| **Console** | `https://kairos-console.lucky-shadow-edb4.workers.dev`: sign in as a demo user (Nina is the owner; Marco and Aisha are managers) with the demo password |
 | API | `https://kairos-api-preview.lucky-shadow-edb4.workers.dev` (OpenAPI at `/v1/openapi.json`) |
 | Tenant | `lotus-line`, environment `preview`; config v2 active (`lotus_line.yaml`) |
 | Demo sign-in | `https://kairos-dev-idp.lucky-shadow-edb4.workers.dev` (preview only; password-protected) |
