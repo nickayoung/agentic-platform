@@ -363,7 +363,8 @@ export class TenantCore extends DurableObject<CoreEnv> {
 
   /**
    * One state change: the body's writes, its audit entry, its events and its outbox rows in one transaction
-   * (I-29, §3A.1 C1). The alarm is moved earlier afterwards if an outbox row is due sooner.
+   * (I-29, §3A.1 C1). Afterwards the alarm is re-armed from every tick source, so any work the change created
+   * (an outbox row, a staged config version, a hold, …) is woken on time (§19.5).
    */
   protected async mutate<R>(
     c: CallContext,
@@ -376,7 +377,8 @@ export class TenantCore extends DurableObject<CoreEnv> {
   ): Promise<R> {
     this.enter(c.scope);
     const now = Date.now();
-    const { result, outboxDue } = this.db.tx((tx) => {
+    // wrapped so the generic R can't be a promise as far as db.tx's type is concerned
+    const { result } = this.db.tx((tx) => {
       const out = body(tx, now);
       const cv = tx.maybe<{ number: number }>(`SELECT number FROM config_version WHERE state = 'active'`)?.number ?? 0;
       appendAudit(tx, {
@@ -385,14 +387,10 @@ export class TenantCore extends DurableObject<CoreEnv> {
         after: out.audit.after, request_id: c.requestId, config_version: cv,
       });
       for (const e of out.events ?? []) emitEvent(tx, e, now);
-      let due: number | null = null;
-      for (const o of out.outbox ?? []) {
-        enqueue(tx, o, now);
-        due = Math.min(due ?? Infinity, o.notBefore ?? now);
-      }
-      return { result: out.result, outboxDue: due };
+      for (const o of out.outbox ?? []) enqueue(tx, o, now);
+      return { result: out.result };
     });
-    if (outboxDue !== null) await this.scheduler.poke(outboxDue);
+    await this.scheduler.rearm();
     return result;
   }
 

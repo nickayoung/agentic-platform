@@ -33,9 +33,12 @@ Tracks §15 Phase 0 against the code. Updated with each Phase 0 change.
 | Observability baseline (§13.9) | **Partly**: structured logs, Workers observability on. Analytics Engine metrics and the ops alert cron not started |
 | `kairos-sync` skeleton with read-only adapters | **Done** against a normalised gateway contract; real BookingVendor and ShiftTool API details are still open (Q-11) |
 | Kairos console (TanStack Start) Phase 0 screens | **Not started** |
+| CI on Cloudflare (`apps/ci`, §19.18) | **Built and tested locally**: Worker tests pass, and the runner image ran the full suite against the Artifacts repo. Not deployed yet |
 | Phase 0 spikes (§19.17) | **1 done** (CEL interpreter). 2–6 need a Cloudflare account: throughput, solver cold start, console on Workers, PITR drill, storage growth |
 
 ## Findings while building
+
+- **Staged config versions waited for an unrelated wake-up.** After a change, `TenantCore` only pulled the alarm forward for new outbox rows, so a version published with a future `effective_from` activated at the next unrelated alarm. Every change now re-arms from all tick sources. Found by running the suite in the `kairos-ci` container at a different time of day; the test now pins the maintenance slot so it fails without the fix at any time.
 
 - **`rowsWritten` counts index writes.** DO SQLite's `rowsWritten` includes index entries, so a one-row UPDATE on an indexed table reports more than 1. `Tx.run` returns `changes()` instead.
 - **Unnamed CHECK constraints can't be mapped to reason codes.** SQLite reports them by expression, not by table. Constraints that map to reason codes are named (`entitlement_balance_nonneg`, `limit_counter_within_max`).

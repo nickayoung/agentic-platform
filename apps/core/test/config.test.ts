@@ -105,6 +105,9 @@ describe('manual config pipeline (§6, §15 Phase 0 acceptance 1)', () => {
     const v = await stub.validateDraft(c, d.id);
     const s = await stub.submitDraft(c, d.id, v.version);
     const at = Date.now() + 3_600_000;
+    // make sure no unrelated wake (the daily maintenance slot) comes first, whatever the time of day
+    await runInDurableObject(stub, (obj) => obj.db.tx((tx) => tx.run(
+      `UPDATE scheduler_state SET value = ? WHERE key = 'maintenance_due'`, String(at + 86_400_000))));
     const staged = await stub.approveAndPublish(c, d.id, s.version, { summary: 'next hour', effective_from: at });
     expect(staged.state).toBe('staged');
     expect((await stub.getActiveConfig(scope))!.number).toBe(1);

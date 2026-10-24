@@ -73,6 +73,7 @@
 | D-67 | **Kairos ships one UI, `kairos-console`, in TanStack Start.** It is a plain API client with no scheduling logic. The tenant's three front ends stay the tenant's | Owners and managers need the config, triage, roster and hours screens; principle "front ends render what the API returns" holds (§19.14) |
 | D-68 | **Hot data is bounded** to stay under the 10 GB object limit: decisions after 400 days and audit after 90 days move to R2 (audit to a locked bucket); alert at 6 GB | Seven-year audit retention without outgrowing one object (§19.7) |
 | D-69 | **Everything Kairos runs lives on Cloudflare**: compute, storage, timers, solver, console, logs, metrics and backups. The off-site backup copy is an R2 bucket in a separate Cloudflare account, not a second provider. Outside systems are reached through the gateway as before; load-test and synthetic-probe clients may run anywhere | Product constraint; one platform to operate. A Cloudflare-wide outage or loss is accepted as a risk (R-16) |
+| D-70 | **Source in Cloudflare Artifacts; CI is a Workflow per commit running the checks in a Container** (`kairos-ci`). Triggered by polling the watched branches, since Artifacts has no push events | Keeps source and CI on Cloudflare (D-69); Workflows give per-step retries and checkpoints; a fresh container per run isolates runs (§19.18) |
 
 ## 16.2 Assumptions
 
@@ -183,6 +184,7 @@ v3.1 binds the spec to Cloudflare Workers and Durable Objects, plain TypeScript 
 | Outbox delivered from the scheduler; 6 in flight per object | §19.6 |
 | Zod 4 + Hono `zod-openapi` → OpenAPI; plain ports | §4, §6.3, §11.1, §15, §19.11, D-62 |
 | Everything on Cloudflare: logs, metrics and the off-site backup copy moved onto Cloudflare | §12.9, §13.1, §13.9, §19.9, §19.11, D-69, R-16 |
+| Source in Artifacts; CI as a Workflow + Container | §19.18, D-70 |
 | CEL must interpret | §5.1, §19.12, A-13 |
 | Simulations in `SimulationRun`; solver in Cloudflare Containers | §6.4, §8.1, §19.10, D-66, A-10 |
 | Storage cap, archival, PITR | §12.9, §19.7, §19.9, D-68 |

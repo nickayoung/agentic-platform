@@ -1,6 +1,6 @@
 # 19. Platform binding: Cloudflare, TypeScript, TanStack
 
-§1–§18 describe Kairos in platform-neutral terms: "edge functions", "per-object stores", "one SQLite DB per tenant". This section binds those terms to the chosen stack and states the rules that follow from it. The one hard constraint is that **everything Kairos runs lives on Cloudflare** (D-69). Outside systems (the tenant's shared services, BookingVendor, ShiftTool, Stripe, the LLM provider) are still called through the gateway. Where this section and an earlier one disagree, this section wins; the earlier sections have been patched to match (D-61 – D-69).
+§1–§18 describe Kairos in platform-neutral terms: "edge functions", "per-object stores", "one SQLite DB per tenant". This section binds those terms to the chosen stack and states the rules that follow from it. The one hard constraint is that **everything Kairos runs lives on Cloudflare** (D-69). Outside systems (the tenant's shared services, BookingVendor, ShiftTool, Stripe, the LLM provider) are still called through the gateway. Where this section and an earlier one disagree, this section wins; the earlier sections have been patched to match (D-61 – D-70).
 
 | Concern | Choice |
 |---|---|
@@ -14,7 +14,8 @@
 | Object storage | **R2** (exports, audit archive, solver payloads, simulation results) |
 | Solver | **Cloudflare Containers**, Python + OR-Tools CP-SAT (D-02 unchanged) |
 | Kairos console (UI) | **TanStack Start** (React) on Workers, with TanStack Router, Query, Form and Table (D-67) |
-| Tests | Vitest with `@cloudflare/vitest-pool-workers` (real `workerd`, real DO SQLite), `fast-check` for property tests |
+| Tests | Vitest with `@cloudflare/vitest-plugin` (real `workerd`, real DO SQLite), `fast-check` for property tests |
+| Source and CI | Git repository in **Cloudflare Artifacts**; CI is **`kairos-ci`**: a Workflow per commit running the checks in a Container (§19.18, D-70) |
 | Observability | Workers Logs (+ Logpush to R2), Workers tracing, Workers Analytics Engine (§19.11) |
 | IaC | `wrangler` configs per Worker and environment, applied from CI |
 
@@ -271,3 +272,20 @@ Each spike has a written result in `docs/spikes/` before the Phase 0 acceptance 
 4. **Console on Workers:** TanStack Start deployed as a Worker, signing in with the staff sign-in service and calling preview through the generated client.
 5. **Point-in-time restore drill** on a preview tenant.
 6. **Storage growth:** a year of reference-tenant volume (§12.9), generated synthetically, stays under the 6 GB alert with the §19.7 retention.
+
+## 19.18 Source and CI on Cloudflare (D-70)
+
+The repository lives in **Cloudflare Artifacts** (namespace `kairos`, repo `agentic-platform`). CI is the `kairos-ci` Worker in `apps/ci`:
+
+- **Trigger.** Artifacts has no push events, so a Cron Trigger polls the watched branches (`WATCH_BRANCHES`) every 2 minutes. A new head commit starts one Workflow instance, whose id is `poll-<sha>`, so a commit is never tested twice by the poll. `POST /runs {branch}` with the `CI_TRIGGER_TOKEN` bearer starts a manual run.
+- **Workflow (`CiWorkflow`).** Each step is retried and checkpointed by Workflows:
+  1. Resolve the commit through the Artifacts binding.
+  2. Mint a read-only Artifacts token that lives a little longer than the run's 45-minute timeout.
+  3. Start a fresh `CiRunner` Container for this run and hand it the remote, token and commit.
+  4. Poll the runner every 15 s until it reports done or the run times out.
+  5. Store the full log and the result in R2 (`kairos-ci` bucket).
+  6. Revoke the token and destroy the container, whatever happened.
+- **Runner (`apps/ci/runner`).** Node 22 with git and pnpm. It clones the commit with the token in an HTTP header (never in the log) and runs the same steps as a contributor: `pnpm install --frozen-lockfile`, `typecheck`, `lint`, the lint-rule tests, and `pnpm test` (the workerd tests, including the 10⁵-operation property test).
+- **Results.** `GET /` is a status page with the latest run per branch; `GET /api/branches`, `GET /runs/{id}` and `GET /runs/{id}/log` serve the same data as JSON and text.
+- **GitHub.** While the GitHub pull request is still how changes are reviewed, `.github/workflows/ci.yml` stays and runs the same steps. It is removed once `kairos-ci` has run green on the same commits.
+

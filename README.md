@@ -6,6 +6,7 @@ Kairos for yoga studios: a scheduling platform that a multi-studio yoga business
 - Config fixtures: [fixtures/configs/](fixtures/configs/) · Gusto CSV example: [fixtures/exports/](fixtures/exports/)
 - Configuration-agent eval cases: [evals/config-agent/cases.yaml](evals/config-agent/cases.yaml)
 - Reviews: [docs/reviews/](docs/reviews/) (review 3 and the v3.0 revision notes)
+- Source: Cloudflare Artifacts `kairos/agentic-platform` (GitHub mirror holds the review PR) · CI: `kairos-ci` (§19.18)
 - Phase 0 progress: [docs/phase-0-status.md](docs/phase-0-status.md)
 
 ## Development
@@ -25,6 +26,7 @@ OCC_RUNS=20 pnpm --filter @kairos/db test   # shorter occupancy property test wh
 | `apps/api` | Worker `kairos-api`: Hono + `@hono/zod-openapi`, auth, tenant resolution, routes, backstop cron. Hosts the Durable Object classes |
 | `apps/core` | `TenantCore` Durable Object: kairos-core database, scheduler, outbox, config pipeline |
 | `apps/sync` | `TenantSync` Durable Object: kairos-sync database, gateway adapters, inbound events |
+| `apps/ci` | `kairos-ci`: CI on Cloudflare: Workflow per commit, runner Container, results in R2 (§19.18) |
 | `apps/control` | `ControlPlane` Durable Object: tenant registry, wrapped keys, lifecycle |
 | `packages/db` | Transactions (`db.tx`), migrations, occupancy, audit chain, canonical JSON |
 | `packages/scheduler` | The single-alarm scheduler, outbox delivery, saga runner (§19.5, §19.6) |
