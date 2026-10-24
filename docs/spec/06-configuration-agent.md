@@ -60,7 +60,7 @@ Layers: **L1** schema, **L2** references, **L3** expressions, **L4** semantic ru
 
 | Layer | Code | Sev. | Rule |
 |---|---|---|---|
-| L1 | `SCHEMA_INVALID` | E | Zod parse fails |
+| L1 | `SCHEMA_INVALID` | E | Effect Schema decode fails (errors reported as JSON Pointer paths, §19.11) |
 | L1 | `DURATION_GRAIN` | E | A duration, buffer or series start is not a multiple of 5 minutes |
 | L1 | `LOCKED_PATH` | E | §4.1.1 |
 | L2 | `UNKNOWN_REF` | E | A key reference does not resolve (policy, template, location, type, role, skill, unit, tier, layout, partition `to`, form, coverage template) |
@@ -106,7 +106,7 @@ Layers: **L1** schema, **L2** references, **L3** expressions, **L4** semantic ru
 
 ## 6.4 Simulation
 
-Simulations run in the batch worker. They use the same `@kairos/engine` package as production, with an in-memory SQLite and a virtual clock.
+Simulations run in a throwaway `SimulationRun` Durable Object per run (§19.10). They use the same `@kairos/engine` package and the same SQLite migrations as production, with a virtual `Clock` layer, and work in chunks so that each alarm stays inside the object's CPU limit.
 
 **Inputs**
 - A pseudonymised snapshot of the future: sessions, bookings, entitlements and people.

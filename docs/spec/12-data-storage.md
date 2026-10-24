@@ -6,40 +6,37 @@ Each service owns its data. No service reads another service's database (D-05).
 
 | Service | Runtime | Data | Owns |
 |---|---|---|---|
-| `kairos-core` | edge functions | one SQLite DB per tenant per environment; per-object stores (SessionGate per class, TimerObject per tenant-env) | config, resources, sessions, assignments, claims, occupancy, places, holds, bookings, waitlists, offers, entitlements, ledger, proposals, tasks, hours, workflows, outbox, decisions, audit, flags, domain modes, `external_ref`, `person_mapping` |
-| `kairos-sync` | edge functions | SQLite DB per tenant per environment | adapter cursors, raw outside snapshots, drift items, shadow disagreements, code mapping tables, `inbound_event` dedupe |
-| `kairos-agent` | edge functions | SQLite DB per tenant per environment | agent sessions, hook runs, transcripts (30 days), eval results |
-| `kairos-worker` | container | stateless; job payloads kept 7 days in object storage | — |
-| control plane | edge function | one SQLite DB | tenant registry, database bindings, key references, tenant lifecycle state |
+| `kairos-core` | Worker `kairos-api` + DO `TenantCore` (§19.1) | one SQLite DB per tenant per environment (the `TenantCore` object's storage); SessionGate queues and the scheduler alarm live in the same object | config, resources, sessions, assignments, claims, occupancy, places, holds, bookings, waitlists, offers, entitlements, ledger, proposals, tasks, hours, workflows, outbox, decisions, audit, flags, domain modes, `external_ref`, `person_mapping` |
+| `kairos-sync` | DO `TenantSync` | SQLite DB per tenant per environment | adapter cursors, raw outside snapshots, drift items, shadow disagreements, code mapping tables, `inbound_event` dedupe |
+| `kairos-agent` | DO `TenantAgent` | SQLite DB per tenant per environment | agent sessions, hook runs, transcripts (30 days), eval results |
+| `kairos-solver` | Cloudflare Container | stateless; job payloads kept 7 days in R2 | — |
+| simulations | DO `SimulationRun`, one per run (§19.10) | throwaway SQLite, deleted at the end of the run | — |
+| control plane | DO `ControlPlane` | one SQLite DB per environment | tenant registry, database bindings, key references, tenant lifecycle state |
 
-`kairos-sync` writes mirrored records **through `kairos-core`'s internal typed API** (`POST /internal/mirror/apply`). Mirrored claims therefore pass the same occupancy constraints as owned ones (I-17).
+`kairos-sync` writes mirrored records **through `kairos-core`'s internal typed API**, the RPC method `TenantCore.mirrorApply()` (§19.1). Mirrored claims therefore pass the same occupancy constraints as owned ones (I-17).
 
 LLM provider calls are outside calls, so they go through the gateway.
 
-## 12.2 The guarded batch
+## 12.2 The transaction (formerly "guarded batch")
 
-The database accepts atomic batches: either every statement applies or none does (A-01). Interactive transactions are not assumed. Every write therefore follows the same steps:
+Each tenant database is the SQLite storage of the tenant's `TenantCore` Durable Object (§19.1, D-61). Writes are single-threaded per object, and `transactionSync` is atomic (A-01). The spec still calls one atomic write a **batch**. A batch is exactly one `transactionSync` callback (§19.2):
 
-1. **Read.** Query the facts the engine needs, plus the `version` of every row or resource-day the decision depends on.
+1. **Read.** Query the facts the engine needs.
 2. **Decide.** Run pure engine code.
-3. **Write one batch** that contains:
+3. **Check and write**, in the same callback:
    - the writes;
-   - the guards:
-     - unique keys;
-     - CHECK constraints;
-     - **version guards with a batch token**: `UPDATE t SET version = version + 1, last_batch = :batch_id WHERE id = ? AND version = ?`, followed by an assert that reads `last_batch`;
-     - **assert rows**, always written as `INSERT INTO batch_assert(ok) VALUES ((<scalar subquery>))`. Because of the `VALUES` form, the insert always writes exactly one row, and `ok` is NULL or 0 when the condition is false. `INSERT … SELECT … WHERE` is **forbidden** for asserts, because it inserts zero rows, and so passes silently, when nothing matches;
-   - `DELETE FROM batch_assert` as the last statement.
-4. **Map failures.** A unique-key violation becomes a conflict reason. An assert or version failure triggers a retry, up to 3 times with jitter, then `STALE_VERSION`.
+   - the **checks**, as code: each reads the rows it needs and throws a tagged error (`PlaceTaken`, `HoldExpired`, …) when the condition is false. A throw rolls the whole transaction back;
+   - the database guards, kept as the last line of defence: unique keys, partial unique indexes and CHECK constraints;
+   - the audit row, domain events and outbox rows (I-29).
+4. **Map failures.** A tagged error is its reason code. A constraint violation is mapped to the same reason code as the matching check, for example the `place_claim` primary key to `PLACE_TAKEN`, or the `occupancy` primary key to `RESOURCE_CONFLICT`.
+
+There is no read-to-write gap inside a batch, so there are no contention retries. A batch never spans an `await`. A command that needs an outside answer (the gateway, the solver, another object) commits in a **second** batch that re-reads and re-decides (§19.2). `version` columns remain for checks that cross an `await` or a client round trip: `If-Match` (§11.2), proposal snapshots (`resource_day`, §8.5) and the commit half of a two-part command. If one of those fails and re-validation also fails, the result is `STALE_VERSION`.
 
 ```sql
-CREATE TABLE batch_assert (ok INTEGER NOT NULL CHECK (ok = 1));   -- NULL or 0 aborts the batch
 CREATE TABLE lanes (y INTEGER PRIMARY KEY);                       -- seeded 0..15
 ```
 
-Every table with a version guard has a `last_batch TEXT` column. A batch holds at most 100 statements and 1 MB (A-06). Larger work uses sagas (§8.7) or idempotent chunks (§6.8).
-
-A CI lint rule checks every SQL string under `packages/db/**`. An `INSERT INTO batch_assert` that is not followed by `VALUES ((` fails the build.
+A batch must finish within 50 ms of CPU and write at most about 500 rows (A-06). Larger work uses sagas (§8.7) or idempotent chunks (§6.8). A CI lint rule rejects any `await`, `Gateway` or `Rpc` use inside a transaction body (§19.2).
 
 ## 12.3 Occupancy: the shared calendar
 
@@ -51,7 +48,7 @@ CREATE TABLE claim (
   domain TEXT NOT NULL CHECK (domain IN ('classes','shifts','blocks')),
   source TEXT NOT NULL CHECK (source IN ('platform','mirror')),
   state TEXT NOT NULL CHECK (state IN ('active','conflicted','released')),
-  version INTEGER NOT NULL DEFAULT 1, last_batch TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
   CHECK (occ_start < occ_end AND occ_start % 300000 = 0 AND occ_end % 300000 = 0));
 CREATE INDEX claim_resource_time ON claim(resource_id, occ_start) WHERE state != 'released';
 
@@ -60,7 +57,7 @@ CREATE TABLE occupancy (resource_id TEXT NOT NULL, grain INTEGER NOT NULL, lane 
 CREATE INDEX occupancy_claim ON occupancy(claim_id);
 
 CREATE TABLE resource_day (resource_id TEXT NOT NULL, day TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
-  last_batch TEXT, PRIMARY KEY (resource_id, day)) WITHOUT ROWID;
+  PRIMARY KEY (resource_id, day)) WITHOUT ROWID;   -- bumped by every batch that changes the person-day (§8.5)
 ```
 
 **Exclusive claim** (a teacher, a room, or a desk worker as a person):
@@ -115,7 +112,7 @@ A `conflicted` result raises a `cross_domain_conflict` drift item through the ou
 ```sql
 CREATE TABLE place (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, place_no INTEGER NOT NULL, spot_resource_id TEXT,
   label TEXT NOT NULL, partition_key TEXT NOT NULL DEFAULT 'general', released_to TEXT, released_at INTEGER,
-  reserved_for TEXT CHECK (reserved_for IN ('waitlist')), disabled INTEGER NOT NULL DEFAULT 0,
+  reserved_for TEXT CHECK (reserved_for IN ('waitlist')), reserved_at INTEGER, disabled INTEGER NOT NULL DEFAULT 0,
   attributes TEXT NOT NULL, UNIQUE (session_id, place_no), UNIQUE (session_id, spot_resource_id));
 CREATE TABLE place_claim (session_id TEXT NOT NULL, place_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('hold','booking')),
   holder_id TEXT NOT NULL, customer_id TEXT NOT NULL, expires_at INTEGER,
@@ -137,17 +134,17 @@ CREATE UNIQUE INDEX offer_one_open_place ON offer(waitlist_entry_id)
   WHERE kind = 'place' AND state IN ('sent','accepted');
 ```
 
-**Hold expiry.** The SessionGate alarm releases each hold when it expires. A sweep also runs every minute. It finds expired holds with:
+**Hold expiry.** `TenantCore`'s scheduler sets its alarm to the earliest hold expiry, and wakes at least once a minute while work is pending (§19.5). Each tick finds expired holds with:
 
 ```sql
 SELECT session_id, place_id, holder_id FROM place_claim WHERE kind = 'hold' AND expires_at <= :now LIMIT 200
 ```
 
-and releases them **one session per batch** through `release_place` (§7.7). Each batch deletes the place claim (guarded on holder and expiry), marks the hold `expired`, sets `reserved_for` if the waitlist has waiting entries, and emits `place.released`.
+and releases them **one session per batch** through `release_place` (§7.7). Each batch deletes the place claim (checked on holder and expiry), marks the hold `expired`, sets `reserved_for` and `reserved_at` if the waitlist has waiting entries, and emits `place.released`.
 
 **Substitute accept.** The accept batch updates the offer to `accepted` (the partial unique index rejects a second acceptance for the slot), inserts the proposal, and withdraws the other open offers. A proposal that fails, is rejected or expires sets its offer to `lapsed` in the same batch, which frees the index for the next acceptance (§3A.14).
 
-A second sweep runs promotion for places whose `reserved_for` was set more than 30 s ago. The sweep may never free places with a bare `DELETE`, because that would bypass waitlist priority. Holds claim only places, never occupancy (there are no on-demand bookings in v2.0), so an expired hold can never block a teacher or a room.
+The same tick runs promotion for places whose `reserved_at` is more than 30 s ago. The tick may never free places with a bare `DELETE`, because that would bypass waitlist priority. Holds claim only places, never occupancy (there are no on-demand bookings in v2.0), so an expired hold can never block a teacher or a room.
 
 ## 12.5 Bookings, counters, ledger
 
@@ -155,7 +152,7 @@ A second sweep runs promotion for places whose `reserved_for` was set more than 
 CREATE TABLE booking (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, place_id TEXT, customer_id TEXT NOT NULL,
   session_start INTEGER NOT NULL, state TEXT NOT NULL, payment TEXT NOT NULL, terms TEXT NOT NULL, group_id TEXT,
   booked_via TEXT NOT NULL, config_version INTEGER NOT NULL,
-  decision_id TEXT NOT NULL, source TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, last_batch TEXT,
+  decision_id TEXT NOT NULL, source TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE UNIQUE INDEX booking_one_active ON booking(session_id, customer_id)
   WHERE state IN ('pending_approval','confirmed','checked_in') AND group_id IS NULL;
@@ -170,7 +167,7 @@ CREATE INDEX customer_strike_window ON customer_strike(customer_id, at) WHERE re
 CREATE TABLE limit_counter (key TEXT PRIMARY KEY, count INTEGER NOT NULL, max INTEGER NOT NULL, window_end INTEGER NOT NULL,
   CHECK (count >= 0 AND count <= max)) WITHOUT ROWID;
 CREATE TABLE entitlement_balance (entitlement_id TEXT NOT NULL, unit TEXT NOT NULL, balance INTEGER, period_start INTEGER,
-  version INTEGER NOT NULL DEFAULT 1, last_batch TEXT, PRIMARY KEY (entitlement_id, unit),
+  version INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (entitlement_id, unit),
   CHECK (balance IS NULL OR balance >= 0)) WITHOUT ROWID;     -- hundredths of a unit; NULL = unlimited
 CREATE TABLE ledger (id TEXT PRIMARY KEY, entitlement_id TEXT NOT NULL, unit TEXT NOT NULL, delta INTEGER NOT NULL,
   kind TEXT NOT NULL, booking_id TEXT, reason TEXT, actor TEXT NOT NULL, at INTEGER NOT NULL,
@@ -215,11 +212,11 @@ CREATE TABLE audit (seq INTEGER PRIMARY KEY, id TEXT UNIQUE, at INTEGER, actor T
 CREATE TABLE saga (id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT, step INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL CHECK (state IN ('running','done','parked','compensating','failed')),
   lease_until INTEGER, attempts INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL,
-  version INTEGER NOT NULL DEFAULT 1, last_batch TEXT, created_at INTEGER NOT NULL);
+  version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
 CREATE INDEX saga_due ON saga(state, lease_until);
 ```
 
-Each saga step's batch advances `saga.step` with a version guard, so a step can't run twice (§3A.1 C6). Kinds: `closure`, `session_cancel_bookings`, `session_edit`, `roster_commit`, `customer_merge`, `customer_close`, `tenant_close`, `offboard`, `config_post_activation`, `domain_switch`.
+Each saga step's batch checks `saga.step` and advances it in the same transaction, so a step can't run twice (§3A.1 C6). Kinds: `closure`, `session_cancel_bookings`, `session_edit`, `roster_commit`, `customer_merge`, `customer_close`, `tenant_close`, `offboard`, `config_post_activation`, `domain_switch`.
 
 ## 12.8 Concurrency control summary
 
@@ -227,30 +224,32 @@ Each saga step's batch advances `saga.step` with a version guard, so a step can'
 |---|---|
 | A person, room or desk lane double-claimed, from any domain or source | `occupancy` primary key |
 | Two members on one mat | `place_claim` primary key |
-| A waitlisted member bypassed by a new booker | `place.reserved_for`, set by `release_place` on every freeing path, plus the hold assert (§7.5.2); promotion sweep when the gate is down |
+| A waitlisted member bypassed by a new booker | `place.reserved_for`, set by `release_place` on every freeing path, plus the hold check (§7.5.2); promotion from the scheduler tick if the alarm is late |
 | Double booking by one member | partial unique index on `booking` |
 | Over-spending credits | CHECK `balance >= 0` |
 | Exceeding a limit or cap | `limit_counter` CHECK |
-| Rest, transfer or max-hours rules broken by concurrent writes | `resource_day` version + `last_batch` assert |
+| Rest, transfer or max-hours rules broken by concurrent writes | single-writer transaction; `resource_day.version` for proposals built from an older snapshot (§8.5) |
 | Concurrent proposal edits | `If-Match` on `proposal.version` |
-| Booking-rush fairness | SessionGate |
-| Lost hold expiry | upsert over expired row + alarm + 1-minute sweep |
+| Two writes to one tenant interleaving | impossible inside a transaction (single-writer object); across an `await`, re-read and re-decide (§19.2) |
+| Audit chain forks | single-writer object; `prev_hash` read and written in the same transaction (§19.2) |
+| Booking-rush fairness | SessionGate queue inside `TenantCore` (§19.3) |
+| Lost hold expiry | upsert over expired row + scheduler alarm (≤ 60 s) + 5-minute backstop cron (§19.5) |
 | Duplicate side effects | `UNIQUE` idempotency keys (runs, actions, outbox, ledger, check-ins, inbound events) |
 | Two substitutes accepted for one slot | partial unique index `offer_one_accepted_substitute` |
-| A saga step applied twice | `saga.step` version guard |
+| A saga step applied twice | `saga.step` check in the step's transaction |
 | Stale config | `config_epoch` read on every request |
 
 ## 12.9 Volume, retention, migrations, backups
 
-- **Volume** (reference tenant, per year): about 16k sessions, 400k bookings, 1M occupancy rows created (and pruned), 2M events and 3M audit rows. That is a few GB per tenant database.
+- **Volume** (reference tenant, per year): about 16k sessions, 400k bookings, 1M occupancy rows created (and pruned), 2M events and 3M audit rows. That is a few GB per tenant database. A Durable Object's SQLite storage is capped at 10 GB, so pruning and archiving to R2 are required (§19.7).
 - **Pruning:**
 
   | Data | Kept for |
   |---|---|
   | Occupancy | 7 days after its grain |
   | Domain events | 90 days |
-  | Decision traces | 400 days |
-  | Audit log | 7 years; segments older than 90 days are archived (still hash-chained) |
+  | Decision traces | 400 days (archived to R2, §19.7) |
+  | Audit log | 7 years; segments older than 90 days are archived to a locked R2 bucket (still hash-chained, §19.7) |
 
-- **Schema migrations:** numbered SQL files in `packages/db/migrations`, applied by the migration runner per tenant database as **expand → migrate → contract**. Code supports schema versions N and N−1. Preview databases migrate first, then production after a 24 h soak.
-- **Backups:** the provider's point-in-time restore (≥ 30 days), plus a nightly logical export to S3-compatible object storage at a second provider. Restore drills run quarterly. The engine release process is in §13.10.
+- **Schema migrations:** numbered SQL files in `packages/db/migrations`, applied by each object in its constructor before it serves a request (§19.8), as **expand → migrate → contract**. Code supports schema versions N and N−1. Preview databases migrate first, then production after a 24 h soak.
+- **Backups:** Durable Object point-in-time restore (30 days, per object, so per tenant), plus a nightly logical export to R2 that is copied to S3-compatible storage at a second provider (§19.9). Restore drills run quarterly. The engine release process is in §13.10.

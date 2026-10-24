@@ -11,8 +11,8 @@
 | D-05 | Each service owns its data. `kairos-sync` writes mirrored data through `kairos-core`'s API | This is the tenant's rule, and it puts every claim through the same constraints |
 | D-06 | **One occupancy table** keyed `(resource, 5-min grain, lane)` for classes, shifts and blocks, from both platform and mirror | SQLite has no exclusion constraints. This enforces "no desk shift during a class you teach" in the database |
 | D-07 | Grain is 5 minutes. Durations, buffers and start times must be multiples of it | Fine enough for yoga buffers; keeps row counts small |
-| D-08 | **Guarded batches**: unique keys, CHECK constraints, version guards with a `last_batch` token, and asserts that are **always scalar** | Edge SQLite has batch semantics. Asserts that can match zero rows silently pass, so they are forbidden (fixes review F-01) |
-| D-09 | SessionGate orders requests; it is not the source of truth. **This departs from the brief's technical context**, which named the per-object store for holds and counters. In Kairos, holds and counters are authoritative in the database, and the per-object store only orders requests and runs alarms | Correctness survives a gate outage |
+| D-08 | **A batch is one single-writer transaction** (`transactionSync` in `TenantCore`). Checks run as code inside it and throw to roll back; unique keys and CHECK constraints stay as the backstop; `version` columns only guard across `await`s and client round trips. *(v3.1: replaces the scalar-assert design. The F-01 zero-row hazard can't arise, because a check reads its rows and throws when the condition is false.)* | Durable Object SQLite gives real transactions with no interleaving (D-61, D-63) |
+| D-09 | SessionGate orders requests; it is not the source of truth. **This departs from the brief's technical context**, which named the per-object store for holds and counters. In Kairos, holds and counters are authoritative in the database. *(v3.1: the gate is an in-memory queue inside the tenant's `TenantCore` object, D-64; alarms belong to the scheduler, D-65.)* | Correctness survives a lost queue or a restart |
 | D-10 | Templates, timetable, policies, products, constraints and workflows are **config**. People, members, sessions and bookings are **data** | Rules change through approved versions; facts change daily |
 | D-11 | `template.kind` is a UI label, and lint blocks engines from reading it | Keeps behaviour in the primitives |
 | D-12 | The substitute finder is hosted by Kairos. The member and staff assistants are owned by the tenant | The tenant owns the chat surfaces, inbox and help base |
@@ -64,29 +64,39 @@
 | D-58 | A booking still `pending_approval` at session start is rejected | No approval after the class has begun (review H-18) |
 | D-59 | A freed place is reserved for the waitlist only if at least one waiting entry could be eligible for its partition | A front-row place isn't blocked by a waitlist that can't use it (review H-25) |
 | D-60 | At the classes cutover, mirrored future sessions are adopted into timetable series by (template, studio, local date, local start); unmatched ones become one-off sessions | No duplicate or lost classes at cutover (review H-12) |
+| D-61 | **Tenant databases are SQLite-backed Durable Objects**: one `TenantCore` (and one `TenantSync`, one `TenantAgent`) per tenant and environment, named `"{tenant}:{env}"`. D1 was rejected | Real transactions; single-writer audit chain; objects created by name with no per-tenant bindings; per-tenant point-in-time restore (§19.1, §19.2) |
+| D-62 | **Effect** for services, errors and runtime; **Effect Schema** replaces Zod for config, API and events; `@effect/platform` `HttpApi` generates OpenAPI 3.1 and TypeScript clients | One schema language from config to API to UI forms; typed errors map to reason codes (§19.11) |
+| D-63 | **A transaction never spans an `await`.** A command that needs an outside answer commits in a second transaction that re-reads and re-decides. Transaction bodies are synchronous and lint-checked | Keeps the single-writer guarantee meaningful; no decision is committed on a stale read (§19.2) |
+| D-64 | **SessionGate is an in-memory per-session queue inside `TenantCore`**, not a separate object | Ordering across `await`s without an extra hop; the object already serialises transactions (§19.3) |
+| D-65 | **One scheduler per object** drives its single alarm for hold expiry, promotion, timers, sagas, outbox and maintenance, waking at least every 60 s while work is pending, with a 5-minute Cron Trigger backstop. No queue product | A Durable Object has one alarm; one idempotent tick replaces every "sweep" (§19.5, §19.6) |
+| D-66 | **Simulations run in throwaway `SimulationRun` Durable Objects**; the CP-SAT solver runs in Cloudflare Containers | Simulations need the TypeScript engine and the production SQL dialect; the solver needs Python (§19.10) |
+| D-67 | **Kairos ships one UI, `kairos-console`, in TanStack Start.** It is a plain API client with no scheduling logic. The tenant's three front ends stay the tenant's | Owners and managers need the config, triage, roster and hours screens; principle "front ends render what the API returns" holds (§19.14) |
+| D-68 | **Hot data is bounded** to stay under the 10 GB object limit: decisions after 400 days and audit after 90 days move to R2 (audit to a locked bucket); alert at 6 GB | Seven-year audit retention without outgrowing one object (§19.7) |
 
 ## 16.2 Assumptions
 
 | ID | Assumption | If it's wrong |
 |---|---|---|
-| A-01 | Edge SQLite batches are atomic and run one at a time per database | Serialise writes through a per-tenant writer object |
-| A-02 | The per-object store is single-threaded per object, durable, and supports alarms | Fall back to the database plus the sweep; correctness is unaffected |
+| A-01 | A SQLite-backed Durable Object runs one request handler at a time between `await`s, and `transactionSync` is atomic (D-61) | — (platform guarantee; covered by the §14.1 transaction tests) |
+| A-02 | Durable Object alarms are durable and delivered at least once, with platform retries | The 5-minute backstop cron re-arms missing alarms (§19.5); correctness is unaffected |
 | A-03 | BookingVendor's API (via the gateway) covers reading classes, bookings and members, writing bookings, cancelling, changing teachers and creating classes, and it emits events | No events: poll every 2 min. No class creation: cut over classes and bookings together |
 | A-04 | ShiftTool can be read and written during the 60-day push period | Manual parallel run |
 | A-05 | Gusto's CSV upload for employee hours (with a workweek column) and its separate contractor CSV upload stay available. Re-uploads for the same payroll overwrite, a zero overwrites, and a blank leaves values unchanged (per Gusto's help pages) | Switch to Gusto's API through the gateway (a new decision) |
-| A-06 | Batches allow ≥ 100 statements and ≤ 1 MB | Smaller chunks |
+| A-06 | A transaction finishes within 50 ms of CPU and about 500 rows; DO SQLite allows 100 KB per statement, 100 bound parameters per statement and 2 MB per row | Smaller chunks or sagas |
 | A-07 | The staff directory exposes people, groups, location, active state and email, plus `person.created` and `person.deactivated` events | Nightly sync only, so offboarding takes ≤ 24 h unless a manager deactivates the person in Kairos |
 | A-08 | Member emails are verified by the member sign-in service | Linking at the desk |
 | A-09 | All reference studios are in one time zone; the platform supports many | — |
-| A-10 | A container host outside the hyperscale clouds is acceptable for the solver and simulation | Investigate a WASM solver build for small problems |
+| A-10 | Cloudflare Containers can run the OR-Tools solver within the §15 timing targets, cold start included (Phase 0 spike, §19.17) | Keep a warm instance; else a container host outside Cloudflare reached through the gateway |
 | A-11 | The processor supports authorise-then-capture, saved methods with consent, idempotency and dunning webhooks | Waitlist auto-charge degrades to offers; past-due handled manually |
-| A-12 | Edge clocks are within ±1 s | Hold margins absorb ±5 s |
-| A-13 | A TypeScript CEL library passes the conformance subset, or the profile is built in house | Phase 0 schedule risk |
+| A-12 | Server clocks on Workers and Durable Objects are within ±1 s | Hold margins absorb ±5 s |
+| A-13 | A TypeScript CEL library that **interprets** (no `eval` or `new Function`) passes the conformance subset inside `workerd`, or the profile is built in house | Phase 0 schedule risk |
 | A-14 | Kairos's own commercial plans and billing for tenants are out of scope for this spec | A separate billing spec |
 | A-15 | *(Resolved: Kairos notifies members itself, D-51; BookingVendor's cancel-and-refund is confirmed, D-44.)* | — |
 | A-17 | BookingVendor's events show when a booking came from its waitlist and when it sends a waitlist offer, so mirror ingestion can emit `booking.confirmed{booked_via: waitlist}` and `waitlist.offered` | BookingVendor's own waitlist messages stay on until the bookings cutover |
 | A-18 | Stripe (via the gateway) provides: PaymentIntents with manual capture; off-session charges with a saved PaymentMethod after SetupIntent consent; Refunds; Checkout Sessions; Billing subscriptions with `pause_collection` and dunning webhooks; `Idempotency-Key`; test mode | — (these are standard Stripe features; confirm the account's settings at onboarding) |
 | A-16 | *(Resolved: confirmed by the tenant; now D-45.)* | — |
+| A-19 | Kairos builds only `kairos-console`; the website, desk app and staff portal are built by the tenant against the public API (§18.4) | If Kairos builds any of them, it uses the same TanStack stack and the §19.14 rules, and §18.4 stays the feature contract |
+| A-20 | One `TenantCore` object can serve 600 requests/s sustained and holds up to 10 GB (§19.4, §19.7) | Move reads to a read-model object (R-13); split cold tables into a second object |
 
 ## 16.3 Review findings addressed in v2.0
 
@@ -157,3 +167,22 @@ The review is committed at `docs/reviews/review-3.md`, and the triage, change lo
 | H-14 endpoints | §11.2 `me` and preview, §11.3, §18.4 |
 | H-15 notifications via workflows | §3A (Notify rows), §9.2 required notices, §6.3 `NOTICE_MISSING`, §4b.1 workflows |
 | H-16 – H-28 (minor) | Sick call (§3A.11, D-52); move (§3A.12.9, D-50); approval at start (§7.8, D-58); counters (§12.5); `booked_via` (§5.3, §4b.1); offer storage and `lapsed` (§3.8, §12.4); 6 h boundary (§8.6); layers (§6.3); glossary (§2); partition reservation (§7.7, D-59); shift mapping (§18.5); Phase 3 hooks and Phase 1 scope (§15); `kind` for payroll (§14.1, D-56) |
+
+## 16.6 Platform binding (v3.1)
+
+v3.1 binds the spec to Cloudflare Workers and Durable Objects, Effect and TanStack (§19). No domain behaviour changes.
+
+| Change | Where |
+|---|---|
+| Tenant DB = Durable Object SQLite; services as DO classes | §19.1, §12.1, §13.1, D-61 |
+| Guarded batch → transaction; `batch_assert`, `last_batch` and the scalar-assert lint removed; checks in code | §12.2, §7.5.2, §7.5.4, §8.5, §14.1, D-08, D-63 |
+| Audit chain made single-writer (a fork was possible with D1-style batches) | §19.2, §12.8 |
+| SessionGate moved inside `TenantCore`; "gate down" variants replaced by alarm-drop and restart variants | §19.3, §7.5, §7.7, §14.1, A.2, A.3, `a2_…`, `a3_…`, D-09, D-64 |
+| TimerObject and every sweep → one scheduler per object + backstop cron; `place.reserved_at` added | §19.5, §9.5, §12.4, §3A, §13.8, D-65 |
+| Outbox delivered from the scheduler; 6 in flight per object | §19.6 |
+| Zod → Effect Schema; `HttpApi` → OpenAPI | §4, §6.3, §11.1, §15, §19.11, D-62 |
+| CEL must interpret | §5.1, §19.12, A-13 |
+| Simulations in `SimulationRun`; solver in Cloudflare Containers | §6.4, §8.1, §19.10, D-66, A-10 |
+| Storage cap, archival, PITR | §12.9, §19.7, §19.9, D-68 |
+| Kairos console in TanStack Start | §19.14, §15, D-67, A-19 |
+

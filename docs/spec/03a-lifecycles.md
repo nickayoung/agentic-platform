@@ -9,7 +9,7 @@ Each event is written as a card with the same rows:
 | Row | Meaning |
 |---|---|
 | **Trigger** | What starts the event and which actors may cause it |
-| **State changes** | The ordered changes. Numbered steps inside one bullet run in **one guarded batch** (§12.2) unless the card says *saga* |
+| **State changes** | The ordered changes. Numbered steps inside one bullet run in **one batch**, a single transaction (§12.2) unless the card says *saga* |
 | **Dependants** | What happens to bookings, sessions, shifts, waitlists, entitlements and holds |
 | **Notify** | The domain events emitted. The reference workflow in §4b.1 that turns each one into a notification-service call is named in brackets |
 | **Outside** | What changes in outside systems, through the gateway, per domain mode: **M** mirror · **S** shadow · **O** owner |
@@ -18,12 +18,12 @@ Each event is written as a card with the same rows:
 
 **Common rules.** A card that says nothing on a row means the common rule applies.
 
-- **C1 Atomic state + audit + events.** Every state change is one guarded batch. That batch also writes the audit entry (actor including `on_behalf_of` and `run_id`, action `<entity>.<event>`, target, `before_hash`, redacted `after`, `request_id`, `config_version`), the domain events and the outbox rows (I-29). If the batch aborts, nothing changed. The caller receives the mapped reason code, and clients retry with the same `Idempotency-Key`.
+- **C1 Atomic state + audit + events.** Every state change is one batch (one `TenantCore` transaction, §12.2). That batch also writes the audit entry (actor including `on_behalf_of` and `run_id`, action `<entity>.<event>`, target, `before_hash`, redacted `after`, `request_id`, `config_version`), the domain events and the outbox rows (I-29). If the batch aborts, nothing changed. The caller receives the mapped reason code, and clients retry with the same `Idempotency-Key`.
 - **C2 Notifications only through workflows.** The engine never sends a message. It emits a domain event; a workflow (§9) with a `notify` action writes an outbox row to the notification service. Validation warns with `NOTICE_MISSING` (§6.3) when a config has no workflow for an event marked *required notice* in §9.2. **The reference tenant has `member_messaging: kairos` (D-51):** Kairos sends every member and staff message in every domain mode, including messages about records still mirrored from BookingVendor, and BookingVendor's own member messages are switched off (§3A.3). Under `record_holder`, workflows run only for owned domains (§9.3).
 - **C3 Outside systems only through the outbox and gateway.** In **M**, Kairos never changes an outside-owned record on its own initiative. A user write is written through synchronously (§7.12), and anything else is left to the outside system. In **S**, Kairos behaves as in M and also computes its own decision as a dry run, logging a `ShadowDisagreement` when it differs. In **O**, Kairos performs the change and pushes it out when `outbound_push` is on.
 - **C4 Mixed domains (D-44).** An event that changes records in two domains runs natively only for the domains Kairos owns. For each domain it doesn't own, Kairos pushes its owned change (for example "class cancelled") to the outside system. The outside system then applies its own consequences to its records (for example cancelling and refunding bookings and telling members), and Kairos mirrors the result.
 - **C5 Post-commit jobs.** Outbox jobs (refunds, fees, pushes, notifications, calendar events) retry at 1 m, 5 m, 30 m, 2 h and 12 h. Then the job is marked `dead`, a `manager_inbox` task is created, and a money job also pages (§13.9). A failed outbox job never rolls back the committed state. Each card names the compensation, if one exists.
-- **C6 Sagas.** Work larger than one batch is a saga. A `saga` row (§12.7) records `kind`, `step`, `state` and an idempotency key per step. Each step is one batch and is idempotent per `(saga_id, step)`. A sweep every minute resumes any saga whose lease expired, from its last committed step. Each card that uses a saga names its compensation.
+- **C6 Sagas.** Work larger than one batch is a saga. A `saga` row (§12.7) records `kind`, `step`, `state` and an idempotency key per step. Each step is one batch and is idempotent per `(saga_id, step)`. The scheduler (≤ 60 s tick, §19.5) resumes any saga whose lease expired, from its last committed step. Each card that uses a saga names its compensation.
 - **C7 Timers.** Built-in timers (penalty, no-show, attended, minimum attendance, unstaffed, partition release, approval timeout, hold expiry) are `scheduled_action` rows (§12.6). They are scheduled whatever the domain mode, and at fire time they check the domain mode (§3A.2). They are re-planned in the same batch when the session's time changes.
 
 ## 3A.2 Domain-mode matrix
@@ -59,11 +59,11 @@ Dependency rule for owner: classes and shifts have none; bookings needs classes;
 
 | Stage | Steps | Data / money / outside effects |
 |---|---|---|
-| **Provision** | Control-plane record created (`provisioning`) → IaC creates the preview and production databases, per-object namespaces, per-tenant data key, and gateway and notification credentials scoped to the tenant | No member data yet |
+| **Provision** | Control-plane record created (`provisioning`) → IaC registers the tenant in the preview and production `ControlPlane`s (the `TenantCore`, `TenantSync` and `TenantAgent` objects are created on first use, §19.1), creates the per-tenant data key, and gateway and notification credentials scoped to the tenant | No member data yet |
 | **Onboard** (`onboarding`) | (1) The owner signs in; `access` is set by the owner (locked section). (2) The config agent starts from the **yoga starter config** (`fixtures/configs/yoga_starter.yaml`, §4b.2) and the owner's description. (3) All four domains are put in `mirror`. Backfill: classes and bookings from −26 weeks to +90 days, all active members and entitlements, desk shifts −8 to +8 weeks. Then incremental sync starts. (4) Person mapping is built (§18.5); every instructor seen in BookingVendor must be mapped. (5) Preview is seeded from a pseudonymised copy of production and refreshed weekly (§13.1). (6) **Go-live checklist:** zero open drift for 72 h; 100 % of people mapped; config validates with 0 errors; scenario suite green on preview; flags reviewed. (7) **Messaging switch** (`member_messaging: kairos`): in one step, BookingVendor's member notifications are switched off (except payment receipts for charges BookingVendor itself makes, until the bookings and members cutovers), and the flag `messaging.kairos_members` is turned on. Then `live` | Mirror writes are write-through only |
 | **Change** | New studio: config ops add a location, rooms and layouts → publish (§6). Domain cutovers: §3A.18. Commercial plan for Kairos itself: out of scope (A-14) | — |
-| **Offboard** (`offboarding`) | (1) The owner requests it (`POST /tenant/offboard`, a `tenant_offboard` proposal under the two-person rule). Export starts: NDJSON per table plus every config version plus the audit archive, delivered as a signed URL valid for 7 days, with a manifest of row counts and a SHA-256 per file. (2) Mode: **hand back** (domains rolled back to `mirror` per §3A.18 where the outside systems still exist) or **close**. (3) On close, a saga: future sessions are cancelled with reason `tenant_closed` (§3A.9.4); members are notified 14 days ahead (`tenant.closing_notice`); waitlists end; future shifts are vacated without a substitute search. (4) Tokens: token exchange refuses the tenant; service and agent client credentials are revoked; gateway routes and inbound webhooks are removed through the gateway's admin contract; per-object stores are drained. (5) `closed`; `delete_after = closed_at + 30 days` | Open entitlement balances are listed in the export for the tenant's own settlement. Kairos holds no funds |
-| **Delete** | At `delete_after`, if `legal_hold = false`: the per-tenant data key is destroyed (crypto-shredding), the databases and object storage are deleted, and a signed deletion certificate (tenant, time, resources deleted, key ID) goes into the platform's audit archive → `deleted`. A legal hold blocks deletion until the platform owner lifts it | — |
+| **Offboard** (`offboarding`) | (1) The owner requests it (`POST /tenant/offboard`, a `tenant_offboard` proposal under the two-person rule). Export starts: NDJSON per table plus every config version plus the audit archive, delivered as a signed URL valid for 7 days, with a manifest of row counts and a SHA-256 per file. (2) Mode: **hand back** (domains rolled back to `mirror` per §3A.18 where the outside systems still exist) or **close**. (3) On close, a saga: future sessions are cancelled with reason `tenant_closed` (§3A.9.4); members are notified 14 days ahead (`tenant.closing_notice`); waitlists end; future shifts are vacated without a substitute search. (4) Tokens: token exchange refuses the tenant; service and agent client credentials are revoked; gateway routes and inbound webhooks are removed through the gateway's admin contract; the tenant's Durable Objects drain their outbox and stop their alarms (§19.5). (5) `closed`; `delete_after = closed_at + 30 days` | Open entitlement balances are listed in the export for the tenant's own settlement. Kairos holds no funds |
+| **Delete** | At `delete_after`, if `legal_hold = false`: the per-tenant data key is destroyed (crypto-shredding), the databases and object storage are deleted (§19.13), and a signed deletion certificate (tenant, time, resources deleted, key ID) goes into the platform's audit archive → `deleted`. A legal hold blocks deletion until the platform owner lifts it | — |
 
 | Row | Rule |
 |---|---|
@@ -88,7 +88,7 @@ Dependency rule for owner: classes and shifts have none; bookings needs classes;
 | Dependants | Classes: §3A.9.4. Desk shifts: §3A.10.4. Hours: voided, unless the closure is created less than `tenant.closure_pay_notice` before the session start, in which case `pay_protected` (§3A.16) |
 | Notify | Per session: `session.cancelled{reason: closure}` [`no_sub_notice` for members, owned bookings only; `desk_vacated` is not triggered because shifts are cancelled, not vacated]; `assignment.released{reason: session_cancelled}` for staff [`staff_session_cancelled`] |
 | Outside | Classes: M/S write-through cancel per class if supported, else one task per class; O native + push. Shifts: per §3A.10.4 |
-| Failure | A failed step (for example a write-through cancel that BookingVendor refuses) leaves the earlier steps committed. It is retried by the saga sweep; after 5 failures the step is parked, the class keeps its state, and a task "cancel in BookingVendor" is created. The closure response lists parked steps |
+| Failure | A failed step (for example a write-through cancel that BookingVendor refuses) leaves the earlier steps committed. It is retried by the scheduler (§19.5); after 5 failures the step is parked, the class keeps its state, and a task "cancel in BookingVendor" is created. The closure response lists parked steps |
 
 ## 3A.5 Room and mat spot
 
@@ -105,7 +105,7 @@ Dependency rule for owner: classes and shifts have none; bookings needs classes;
 | Notify | `booking.reseated` [`reseat_notice`]; `session.needs_resource` [`room_needed`]; studio-cancel events as §3A.9.4 |
 | Outside | M/S: write-through room or capacity change if supported, else task. O: native + push |
 | Unblock | Deleting the block re-enables places; re-seated bookings stay where they are |
-| Failure | Each session is its own batch inside a saga; a failure leaves earlier sessions done, and the sweep resumes |
+| Failure | Each session is its own batch inside a saga; a failure leaves earlier sessions done, and the scheduler resumes |
 
 ## 3A.6 Staff member
 
@@ -189,7 +189,7 @@ Dependency rule for owner: classes and shifts have none; bookings needs classes;
 | Notify | `session.retimed` / `session.room_changed` / `session.capacity_changed` with `data.from` [`session_changed_notice`: members and assigned staff]; `booking.reseated` [`reseat_notice`]; studio-cancel events for bookings that lost their place |
 | Outside | classes M/S: write-through retime, room or capacity change if supported, else the request fails with `DOMAIN_NOT_OWNED` and the UI shows the BookingVendor link. O: native + push. Booking-side effects (terms, re-seats, cancels) apply only when bookings are owned (C4) |
 | Audit | Old and new times, room and capacity; the acknowledged impact groups |
-| Failure | The edit is one batch (≤ 100 statements, A-06). A larger edit (more than about 60 bookings to re-seat) runs as a saga whose first step writes the exception and claims and closes the session to new bookings, and whose later steps re-seat 40 bookings per step. If the saga is parked, the session stays closed to new bookings and a manager task is created |
+| Failure | The edit is one batch (≤ 50 ms CPU, about 500 rows, A-06). A larger edit (more than about 60 bookings to re-seat) runs as a saga whose first step writes the exception and claims and closes the session to new bookings, and whose later steps re-seat 40 bookings per step. If the saga is parked, the session stays closed to new bookings and a manager task is created |
 
 "This and following" and "all" are config operations (§4.7) and go through §3A.17.
 
@@ -207,7 +207,7 @@ A session with `over_capacity = true` accepts no new holds (`SESSION_FULL`). Fre
 | Notify | `session.cancelled{reason}` [`no_sub_notice`: SMS to the session's customers, including mirrored bookings when bookings aren't owned (D-51)]; `booking.cancelled{reason: studio_cancel}` per booking (owned) [no reference workflow; the session notice covers it]; `assignment.released{reason: session_cancelled}` [`staff_session_cancelled`] |
 | Outside | classes O: push the cancel to BookingVendor (`gateway/booking_vendor/classes/{id}/cancel`) with idempotency key `cancel:{session}`. classes M/S: only staff-initiated cancels are possible, by write-through; built-in cancels are off. bookings O: refunds and fee reversals through the payments gateway. bookings M/S: shadow computes the dry-run studio cancel and compares it with the mirrored booking outcome within 30 min |
 | Audit | Reason, trigger (timer, actor, migration), counts of bookings cancelled and money jobs created |
-| Failure | Session batch aborts → nothing changed, and the timer retries (C7). A booking-saga step failure is resumed by the sweep; the session is already `cancelled`, so no new booking can arrive. **Push failure while bookings aren't owned:** after the third failed attempt (≤ 10 min), `push_failed` drift, an urgent `manager_inbox` task "cancel this class in BookingVendor and tell members", and a staff-chat page through `cross_domain_alert`. Members may otherwise arrive to a cancelled class, so this alert is never rate-limited |
+| Failure | Session batch aborts → nothing changed, and the timer retries (C7). A booking-saga step failure is resumed by the scheduler; the session is already `cancelled`, so no new booking can arrive. **Push failure while bookings aren't owned:** after the third failed attempt (≤ 10 min), `push_failed` drift, an urgent `manager_inbox` task "cancel this class in BookingVendor and tell members", and a staff-chat page through `cross_domain_alert`. Members may otherwise arrive to a cancelled class, so this alert is never rate-limited |
 
 ### 3A.9.5 Minimum attendance and unstaffed checks
 
@@ -216,7 +216,7 @@ A session with `over_capacity = true` accepts no new holds (`SESSION_FULL`). Fre
 | Trigger | Timers at `min_attendance.check_at` and `unstaffed.check_at` (classes domain owner; S dry run; M off) |
 | Minimum attendance | If `booked_count < min` (counting mirrored bookings when bookings aren't owned): `cancel_session` → §3A.9.4 with reason `under_minimum`; `notify_staff` → event `session.under_minimum` [a tenant workflow; none in §4b.1, whose policy cancels] |
 | Unstaffed | If any `roster` requirement is empty, or the room is missing (`needs_resource`): if a **validated `assignment_change` proposal is pending** for that requirement, defer once to `min(proposal.expires_at, start − 30m)` and emit `proposal.urgent` [`approval_urgent`]. Otherwise, or when the deferral ends: `cancel_session` → §3A.9.4 with reason `no_staff` (or `no_room`); `notify_staff` → event `session.unstaffed` [a tenant workflow; none in §4b.1, whose policy cancels] |
-| Failure | A timer that fires late (sweep, ≤ 60 s) runs the same check; a timer that would fire after start does nothing and records `skipped_after_start` |
+| Failure | A timer that fires late (next scheduler tick, ≤ 60 s) runs the same check; a timer that would fire after start does nothing and records `skipped_after_start` |
 
 ### 3A.9.6 Start, no-show timer, completion
 
@@ -233,7 +233,7 @@ A session with `over_capacity = true` accepts no new holds (`SESSION_FULL`). Fre
 | Row | Rule |
 |---|---|
 | Trigger | `POST /rosters/solve {kind: shifts, scope, horizon}` (manager) → solver job → `roster_publish` proposal → `POST /proposals/{id}/approve` (manager of every studio in scope, or auto-approval where configured) |
-| State changes | Saga (§8.7), one batch per person in person-ID order: create the shift sessions that the proposal fills (candidates from `starts`, §4.6) with their desk lane claim → write worker assignments, claims and `resource_day` guards → hours records `scheduled` |
+| State changes | Saga (§8.7), one batch per person in person-ID order: create the shift sessions that the proposal fills (candidates from `starts`, §4.6) with their desk lane claim → write worker assignments, claims and `resource_day` version bumps → hours records `scheduled` |
 | Dependants | Existing published shifts changed by the proposal are released first in the same person batch. Members are unaffected (`participants: none`, I-13) |
 | Notify | `roster.published` [`roster_published`: affected staff], `assignment.confirmed{reason: roster}` |
 | Outside | shifts O: push to ShiftTool while `outbound_push` (the 60-day push period, §18.9); calendar events for opted-in staff. S: dry run compares the proposal with ShiftTool's published shifts. M: off |
@@ -296,7 +296,7 @@ Trigger `POST /holds` (member, desk, member assistant) or `POST /offers/{id}/acc
 
 ### 3A.12.2 Hold expiry or release
 
-Trigger: SessionGate alarm, the 1-minute sweep, `DELETE /holds/{id}`, or a session change. One batch per session through `release_place` (§7.7): place claim deleted (guarded on holder and expiry) → hold `expired`/`released` → `reserved_for` set if an eligible waiting entry exists (D-59) → `place.released{reason}`. A processor authorisation tied to the hold is voided by an outbox job keyed by the hold ID.
+Trigger: the scheduler alarm at `expires_at` (or its ≤ 60 s tick), `DELETE /holds/{id}`, or a session change. One batch per session through `release_place` (§7.7): place claim deleted (guarded on holder and expiry) → hold `expired`/`released` → `reserved_for` set if an eligible waiting entry exists (D-59) → `place.released{reason}`. A processor authorisation tied to the hold is voided by an outbox job keyed by the hold ID.
 
 ### 3A.12.3 Confirm
 
@@ -334,9 +334,9 @@ At `start + grace`: one batch per session marks every unchecked `confirmed` book
 
 | Event | Rule |
 |---|---|
-| Join | `POST /sessions/{id}/waitlist` when §7.7 "Join" holds → `waiting`, `position = max + 1` in the gate batch. Event `waitlist.joined` |
+| Join | `POST /sessions/{id}/waitlist` when §7.7 "Join" holds → `waiting`, `position = max + 1` in the join batch. Event `waitlist.joined` |
 | Leave | `DELETE /sessions/{id}/waitlist/me` → `left` (`end_reason: member_left`); an open place offer for the entry → `withdrawn` |
-| Freed place | `release_place` sets `reserved_for` when at least one `waiting` entry could be eligible for the place's partition (evaluated in the read phase, D-59); the gate's next command (or the sweep after 30 s) runs promotion (§7.7) |
+| Freed place | `release_place` sets `reserved_for` when at least one `waiting` entry could be eligible for the place's partition (evaluated in the read phase, D-59); the SessionGate's next command (or the scheduler at `reserved_at + 30 s`) runs promotion (§7.7) |
 | Auto-promote | One batch: booking `confirmed` (`booked_via: waitlist`), entry → `promoted`, `reserved_for` cleared. Event `booking.confirmed` [`promoted_notice`] |
 | Skip | Entry → `skipped` with the reason code as `end_reason`. Event `waitlist.skipped` [`skipped_notice`] |
 | Offer (offer_all) | Every waiting entry → `offered`; one place `Offer` per entry (`expires_at = now + offer_ttl`, unique open offer per entry, §12.4). Event `waitlist.offered` [`offer_notice`] |
@@ -346,7 +346,7 @@ At `start + grace`: one batch per session marks every unchecked `confirmed` book
 | Member suspended, closed, merged | Entries → `left` (`member_suspended`, `member_closed`); merge keeps the better position (§3A.7) |
 | Entitlement lapses | Nothing at once; at promotion the entry is `skipped` (`NO_ENTITLEMENT`) |
 | Outside | bookings M: off; mirrored entries are read-only. S: dry run. O: native. Mode transitions: §3A.18 |
-| Failure | Promotion is one batch per entry; a failed batch leaves the place reserved, and the sweep retries within 90 s. A failed auto-charge (gateway) skips the entry with `PAYMENT_FAILED` and moves on |
+| Failure | Promotion is one batch per entry; a failed batch leaves the place reserved, and the scheduler retries within 90 s. A failed auto-charge (gateway) skips the entry with `PAYMENT_FAILED` and moves on |
 
 ## 3A.14 Substitute offer and proposal
 
@@ -444,7 +444,7 @@ Every transition is a `domain_mode` proposal under the two-person rule (§18.7) 
 | Batch abort | Every write | Nothing committed; the client retries with the same idempotency key (C1) |
 | Outbox job failure | Money, pushes, notifications, calendar | Retry schedule, then `dead` + task; money pages (C5) |
 | Saga step failure | Closure, studio-cancel bookings, roster publish, merge, close account, tenant close, large session edits | Sweep resumes from the last step; parked after 5 failures with a task; compensations per card (C6) |
-| Timer missed | All built-in timers | 1-minute sweep; re-check at fire time (C7) |
-| Gate outage | Holds, promotion | Database still enforces; sweeps take over (§7.5, §7.7) |
+| Timer missed | All built-in timers | Scheduler tick ≤ 60 s, 5-minute backstop (§19.5); re-check at fire time (C7) |
+| Alarm late or lost | Holds, promotion | Transactions still enforce; the next tick or the backstop catches up (§7.5, §7.7, §19.5) |
 | Outside outage (mirror) | Write-through | `OUTSIDE_UNAVAILABLE`, never queued except check-ins (§7.12) |
 | Push failure (owner) | Pushes | `push_failed` drift after 3 attempts; urgent for session cancels (§3A.9.4) |

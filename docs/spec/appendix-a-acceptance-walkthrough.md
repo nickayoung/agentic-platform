@@ -32,11 +32,11 @@ This trace needs `bookings = owner` (Phase 4 onwards). In Phases 1–3, mat hold
 
 Two members tap Mat 12 (row 2, a wall mat, `general` partition) for Tue 07:00 Vinyasa in Park Slope Studio 1, within the same 50 ms.
 
-1. **Store and constraint.** The place claim is stored in the tenant DB table `place_claim`, whose `PRIMARY KEY (session_id, place_id)` admits one claimant. The SessionGate for this class orders the two requests.
-2. **Member A.** A's batch upserts the place claim with `expires_at = now + 5m` (`hold_ttl`). Its scalar assert `holder_id = A` evaluates to 1. A gets `201` with the hold and the quote.
-3. **Member B.** B's upsert `WHERE` is false because A's hold is live, so nothing changes. B's scalar assert evaluates to 0, the `CHECK (ok = 1)` fails, and the whole batch rolls back. B gets `409 PLACE_TAKEN` with alternatives `[Mat 18, Mat 24]` (equal attributes, nearest first).
-4. **Gate down.** Single-writer SQLite gives the same result.
-5. **A abandons.** At 5 minutes the alarm deletes the claim, marks the hold `expired`, and emits `place.released`. If a waitlist exists, §7.7 applies: the mat is reserved for the waitlist. If the alarm is lost, the 1-minute sweep or the next upsert reclaims the mat.
+1. **Store and constraint.** The place claim is stored in the tenant DB table `place_claim` (in the tenant's `TenantCore` object), whose `PRIMARY KEY (session_id, place_id)` admits one claimant. The SessionGate queue for this class orders the two requests.
+2. **Member A.** A's transaction upserts the place claim with `expires_at = now + 5m` (`hold_ttl`). Its check reads `holder_id = A` and passes. A gets `201` with the hold and the quote.
+3. **Member B.** B's upsert `WHERE` is false because A's hold is live, so nothing changes. B's check reads `holder_id = A`, throws `PlaceTaken`, and the whole transaction rolls back. B gets `409 PLACE_TAKEN` with alternatives `[Mat 18, Mat 24]` (equal attributes, nearest first).
+4. **Without the gate's ordering.** The object runs one transaction at a time, so the result is the same.
+5. **A abandons.** At 5 minutes the alarm deletes the claim, marks the hold `expired`, and emits `place.released`. If a waitlist exists, §7.7 applies: the mat is reserved for the waitlist. If the alarm is late, the next scheduler tick (≤ 60 s) or the next upsert reclaims the mat; if it is lost, the 5-minute backstop re-arms it (§19.5).
 6. **A confirms late.** The guard fails. The engine tries one transparent re-hold. If that fails, A gets `409 HOLD_EXPIRED` and the payment authorisation is voided through the outbox.
 
 ## A.3 Late cancellation with waitlist promotion: **Pass**
@@ -45,8 +45,8 @@ The full timeline is in §9.6.
 
 - **Penalty.** The penalty is deferred to session start. It is waived if `place_refilled` is true. Otherwise, depending on what the late canceller paid with: credit forfeited (pack) and/or a $10 fee (membership), charged through the gateway.
 - **Promotion order.** The freed mat is reserved for the waitlist in the same batch that frees it. A new member's hold on it fails. Promotion then goes by position, honouring mat preferences.
-- **Promoted member.** In `auto_promote` mode there is no hold: the member is booked directly and their credit is reserved. In `offer_all` mode, `POST /offers/{id}/accept` creates the hold in the same batch. The offer moves to `accepted` with `hold_id` set, so the hold assert passes. The hold expires at `min(now + 5m, offer.expires_at + 5m)`, and the member confirms with `POST /bookings`.
-- **Gate down.** Every freeing path runs `release_place`, so the mat is still reserved for the waitlist. The promotion sweep promotes within about 90 s (§7.7).
+- **Promoted member.** In `auto_promote` mode there is no hold: the member is booked directly and their credit is reserved. In `offer_all` mode, `POST /offers/{id}/accept` creates the hold in the same batch. The offer moves to `accepted` with `hold_id` set, so the hold check passes. The hold expires at `min(now + 5m, offer.expires_at + 5m)`, and the member confirms with `POST /bookings`.
+- **Object restart or late alarm.** Every freeing path runs `release_place`, so the mat stays reserved for the waitlist even if the queued promotion is lost. The scheduler promotes at `reserved_at + 30 s`, within about 90 s (§7.7, §19.5).
 - **Mode.** All of this is built-in behaviour that needs `bookings = owner` (§7.13), so the trace applies from Phase 4. Before that, BookingVendor runs its own waitlist and Kairos dry-runs this logic in shadow mode.
 - **Promoted member has no credits.** They are `skipped` (`INSUFFICIENT_UNITS`), `skipped_notice` emails them, and the next member is promoted. If nobody is eligible, the reservation is cleared.
 - **Price-paid canceller.** No units and no fee. `refund.late: none`, so no refund even when refilled; `booking.penalty_assessed{waived: true, refund: none}` (D-48).
@@ -65,7 +65,7 @@ Maya is rostered for Tue 18:00 Hot 75 at Park Slope. At 12:00 she submits a sick
 | 12:00:03 | **Outreach** `POST /offers` ×3, in rank order, at once | `start − now = 6h ≤ 6h`, so each offer expires at 12:10 (D-33). Each `offer.sent` triggers `substitute_offer_notice`, which texts the teacher through the notification service. No quiet hours apply. |
 | 12:10 | All three offers expire | The next wave fetches candidates again. None are left, so the run ends `exhausted` and emits `custom.substitute_exhausted`. A manager task is created. |
 | *(Alternative)* 12:04 | Ana taps Accept (`POST /offers/{id}/accept`) | One engine batch: offer → `accepted`, a `Proposal` is created and validated, and Leo's and Ravi's offers → `withdrawn` (they get `substitute_filled_notice`). If Leo taps Accept in the same instant, the unique index gives him `409 OFFER_FILLED` (D-57). The proposal `expires_at` is 14:04 (`min(start − 30m, now + 2h)`); `approval_needed` tells the managers. |
-| *(Alternative)* 12:15 | Manager approves | Re-validation passes (with the `resource_day` guards and a scalar assert). Ana's claim and hours record are written, the session returns to `scheduled`, and `sub_assigned_notice` notifies members. If Ana (who also has the `desk_staff` role in that variant) was given the 16:00 desk shift before approval, the commit fails with `RESOURCE_CONFLICT`, the proposal → `failed`, her offer → `lapsed`, and outreach continues. |
+| *(Alternative)* 12:15 | Manager approves | Re-validation passes (inside the commit transaction, after checking the proposal's `resource_day` versions). Ana's claim and hours record are written, the session returns to `scheduled`, and `sub_assigned_notice` notifies members. If Ana (who also has the `desk_staff` role in that variant) was given the 16:00 desk shift before approval, the commit fails with `RESOURCE_CONFLICT`, the proposal → `failed`, her offer → `lapsed`, and outreach continues. |
 | *(Alternative)* 15:50–15:58 | A manager sends Ravi an offer at 15:50; he accepts at 15:58 | The proposal (expires 17:30) is pending at 16:30, so the check is deferred once to `min(17:30, 17:30)` = 17:30, and `proposal.urgent` triggers `approval_urgent` (SMS and staff chat). If it is approved before 17:30, the class runs. |
 | 16:30 | **Unstaffed check** (built-in, `unstaffed.check_at: 90m`) | The slot is empty and no proposal is pending, so the class is cancelled with `reason: no_staff`. **Members:** every booking is cancelled, credits are released, price-paid bookings get full refunds through the gateway, waitlist entries expire, and `no_sub_notice` texts everyone. |
 
@@ -82,7 +82,7 @@ Configuration: Phase 1, with `classes = mirror` and `shifts = owner`.
 **Order 1: class known first.**
 
 1. BookingVendor sends `class.updated` for Tue 09:00 Vinyasa at Park Slope, instructor `BV-1187`. `kairos-sync` dedupes the event and maps it: `VIN60` → `vinyasa_60`, room → `ps_studio_1`, and `person_mapping(booking_vendor, BV-1187)` → Priya (matched by email at onboarding).
-2. It calls `POST /internal/mirror/apply`. One batch upserts the session, the assignment, and **claim C1** on Priya's resource for 08:50–10:10 (10-minute buffers), with `source = mirror`. Exclusive occupancy rows are written.
+2. It calls `TenantCore.mirrorApply()` over RPC (§19.1). One batch upserts the session, the assignment, and **claim C1** on Priya's resource for 08:50–10:10 (10-minute buffers), with `source = mirror`. Exclusive occupancy rows are written.
 3. A manager drags Priya onto Park Slope *Desk – opening* (06:15–12:45). The portal calls `POST /assignments`.
 4. The **staleness guard** pulls Priya's Tuesday from BookingVendor and finds C1 current.
 5. The **validator** sees C1 overlapping and returns `409 RESOURCE_CONFLICT`, with facts `{person: Priya, conflict: "Vinyasa 60 09:00–10:00 Park Slope", source: BookingVendor}`.

@@ -32,7 +32,7 @@
 |---|---|---|---|---|
 | R-01 | Mirror staleness: an outside class assignment Kairos hasn't seen yet collides with a new desk shift | M | M | Events plus a targeted pull before staff commits; alert on conflict; the conflicted claim still blocks new claims |
 | R-02 | Unmapped or wrongly mapped teachers in BookingVendor | M | H | Go-live needs 100 % mapped; `unmapped_person` blocks desk assignment and alerts; matching on email first |
-| R-03 | Write throughput during booking-open rushes on one tenant database | L | H | SessionGate; small batches; load tests at 3× peak |
+| R-03 | Write throughput during booking-open rushes on one tenant database | L | H | Single-writer `TenantCore` with short transactions (≤ 50 ms CPU); SessionGate queue; Phase 0 throughput spike; load tests at 3× peak |
 | R-04 | Maturity of the TypeScript CEL library | M | M | Small profile, conformance tests, in-house fallback |
 | R-05 | The solver container adds operational load | M | L | Stateless worker; the booking path doesn't depend on it |
 | R-06 | The config agent produces plausible but wrong configs | M | H | Scenario evals, simulation, impact plans, human approval, fast rollback |
@@ -42,3 +42,6 @@
 | R-10 | Small team working mostly through coding agents | H | M | Typed contracts, fixtures, scenario DSL, property tests, assert lint |
 | R-11 | A Phase 3 class cancel push fails and members arrive to a cancelled class | L | H | Push retries within 10 min, then an urgent task and a non-rate-limited staff page (§3A.9.4) |
 | R-12 | §3A grows out of step with the mechanisms in §7–§12 | M | M | One test file per lifecycle card (§14.1); a card change requires its test change in the same PR |
+| R-13 | One `TenantCore` object is the ceiling for a tenant's total request rate (about 1,000 simple requests/s) | L | H | Edge cache for anonymous reads (≥ 90 % hits); alert at 600 requests/s; fallback: a read-model object fed from domain events (§19.4) |
+| R-14 | A transaction body awaits by mistake, or a two-part command trusts a pre-`await` read | M | H | Synchronous `Storage` service; lint; `runSyncExit` defect test; re-read-and-re-decide rule with mandatory tests (§19.2, §14.1) |
+| R-15 | Solver container cold start breaks the §15 timing targets | M | L | Warm-up ping from the console; targets measured end to end in the Phase 0 spike (§19.10) |
