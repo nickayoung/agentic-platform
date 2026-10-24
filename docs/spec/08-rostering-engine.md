@@ -1,183 +1,134 @@
-# 8. Rostering and optimisation engine
+# 8. Rostering engine
 
-The rostering engine answers "who should work, teach or drive what, and when?". It runs as **batch jobs**, never inside a booking request. Every solution is a **proposal**. A TypeScript validator checks it independently (§8.6), an authorised person approves it (or a policy auto-approves it), and the commit goes through the same occupancy constraints as everything else.
+The rostering engine proposes **teacher assignments for classes** and **desk staff for desk shifts**. It runs as batch jobs. Every result is a **proposal**. A TypeScript validator checks it (§8.5), a manager approves it (or a configured auto-approval does), and the commit goes through the same occupancy constraints as every other write.
 
-## 8.1 Choice: Google OR-Tools (CP-SAT, plus the OR-Tools routing library) over Timefold (D-02)
+## 8.1 Choice: OR-Tools CP-SAT, not Timefold (D-02)
 
-| Criterion | OR-Tools CP-SAT | Timefold Solver |
+| Criterion | CP-SAT | Timefold |
 |---|---|---|
-| Proves infeasibility and returns a conflicting subset of constraints | **Yes.** Solving with assumptions gives `SufficientAssumptionsForInfeasibility` | No. Local search reports a negative hard score, not a proof or a minimal set |
-| Optimality bounds and gap reporting | Yes | No (anytime heuristic) |
-| Rostering (intervals, no-overlap, linear sums) | Native: `NewOptionalIntervalVar`, `AddNoOverlap`, linear constraints | Strong, via constraint streams |
-| Vehicle routing with time windows | The OR-Tools routing library ships in the same package | Strong |
-| Runtime | C++ core; Python, Java, C# and Go bindings; one pip package | JVM (Java/Kotlin) or Python via JPype |
-| Fit with a small TypeScript team | Thin Python worker that reads a JSON IR; all business logic stays in TypeScript | A JVM service with business rules written in Java constraint streams |
-| Licence | Apache-2.0 | Apache-2.0 (community edition); some enterprise features are commercial |
+| Proves infeasibility and returns the conflicting constraints | Yes (`SufficientAssumptionsForInfeasibility`) | No (it reports a negative hard score) |
+| Optimality bounds | Yes | No |
+| Intervals, no-overlap, linear sums | Native | Native, via constraint streams |
+| Runtime | C++ core, Python wheel | JVM |
+| Fit for a small TypeScript team | Thin Python worker reads a JSON IR; all logic stays in TypeScript | JVM service, with rules written in Java |
 
-The deciding factor is **infeasibility reporting**. The spec requires that infeasible configs return *which constraints conflict*. CP-SAT gives this as a solver feature. With Timefold it would have to be approximated. Neither solver runs at the network edge, so either one means a container worker. OR-Tools keeps that worker small: it translates a JSON IR into model calls, and all business meaning stays in TypeScript.
+The deciding factor is infeasibility reporting: the brief requires naming the conflicting constraints, and CP-SAT does this directly. Neither solver runs at the edge, so the solver runs in a stateless container worker (A-10).
 
 ## 8.2 Architecture
 
 ```
-kairos-core (edge, TS)                                  solver worker (container, Python + OR-Tools)
-┌─────────────────────────────────────┐   POST /solve   ┌──────────────────────────────────────┐
-│ 1. Problem builder                  │  (IR JSON,      │ 4. IR → CP-SAT model / routing model │
-│    - load compiled config           │   signed)       │ 5. solve with time limit             │
-│    - load people, availability,     │ ──────────────▶ │ 6. if infeasible: core extraction    │
-│      existing claims (ALL domains,  │                 │    + minimisation                    │
-│      incl. mirrored), published     │ ◀────────────── │ 7. return solution or core           │
-│      roster                         │   callback      └──────────────────────────────────────┘
-│    - evaluate CEL to constants      │   (signed)
-│ 2. Pre-solve checks (pigeonhole)    │
-│ 3. Emit IR                          │
-│ 8. Validate solution (TS validator) │
-│ 9. Create Proposal → approval       │
-│ 10. Commit (saga of guarded batches)│
-└─────────────────────────────────────┘
+kairos-core (edge, TS)                                     solver worker (container, Python + OR-Tools)
+ 1. Problem builder: compiled config, people, availability,  ── POST /solve (signed IR) ──▶ 4. IR → CP-SAT
+    time off, ALL existing claims (owned + mirrored),                                        5. solve (time limit)
+    published roster; CEL evaluated to constants                                             6. core extraction if infeasible
+ 2. Pre-solve pigeonhole checks                              ◀── signed callback ────────── 7. solution / core
+ 3. Emit IR
+ 8. Validate (TS validator) → 9. Proposal → approval → 10. Commit saga
 ```
 
-- **No CEL in the solver.** Every expression (`where`, `people_where`, `assignment_expr`, `rank.expr`) is evaluated in TypeScript while the IR is built, and becomes a domain filter or a constant coefficient.
-- **No PII in the IR.** People are opaque indices. The mapping from index to resource stays in `kairos-core`.
-- **Worker contract:** `POST /solve` with the body signed by a service key (HMAC-SHA256 over the body and a timestamp). It returns `202 { job_id }`. Results come back through a signed callback to `kairos-core`, with a poll endpoint as fallback. The worker is stateless and has no database.
-- **Jobs** come from an outbox topic `solver.requests`. Each job has a key `(tenant, env, kind, scope_hash, data_version)`, so a duplicate request returns the cached result.
+- **No CEL in the solver.** Expressions are evaluated while the IR is built, so they become domain filters or constants.
+- **No PII in the IR.** People appear as opaque indices.
+- **Signed and idempotent.** Requests and callbacks are signed (HMAC over body + timestamp). A job is keyed by `(tenant, env, kind, scope_hash, data_version)`, so a duplicate request returns the cached result.
+- **If the worker is down,** solve jobs queue and the portal shows them as "pending". Bookings never depend on the worker.
 
-## 8.3 Solver IR (summary)
+## 8.3 IR and model mapping
 
-```ts
-interface SolveRequest {
-  kind: 'roster' | 'repair' | 'probe' | 'route';
-  horizon: { start: UtcMs; end: UtcMs };
-  grain_minutes: 5;
-  people: { idx: number; home_zone: string; locations: number[] }[];
-  tasks: {                                  // things that may be staffed
-    idx: number;
-    origin: { type: 'session_requirement'; session_ref: string; requirement_key: string; slot: number }
-          | { type: 'shift_candidate'; template_key: string; location: number; start: number; end: number };
-    start: number; end: number;             // grain indices (occupied interval incl. buffers)
-    location: number; local_day: number; weekday: number; weekend: boolean; tags: string[];
-    eligible: number[];                     // person idx after selector + availability + CEL filtering
-    required: 'exact' | 'optional';         // session requirement slots are exact; shift candidates optional
-    published_person: number | null;        // for stability
-    continuity_person: number | null;
-  }[];
-  fixed_busy: { person: number; start: number; end: number; location: number; ref: string }[];
-                                            // existing claims not being re-planned (mirrored classes, PT, other shifts)
-  coverage: { key: string; level: 'hard' | 'soft'; segments: { start: number; end: number; min: number; target: number;
-              location: number; role: string; candidate_tasks: number[] }[]; weight: number }[];
-  hard: HardGroup[];                        // each has a stable id → constraint key + scope
-  soft: SoftTerm[];
-  time_limit_s: number; seed: number; workers: number;
-}
-type HardGroup =
-  | { id: string; key: string; type: 'max_minutes'; person: number; window: [number, number]; minutes: number }
-  | { id: string; key: string; type: 'min_rest'; person: number; pairs: [number, number][] }   // task pairs too close
-  | { id: string; key: string; type: 'transfer'; person: number; pairs: [number, number][] }
-  | { id: string; key: string; type: 'max_count'; person: number; window: [number, number]; count: number }
-  | { id: string; key: string; type: 'max_consecutive_days'; person: number; days: number }
-  | { id: string; key: string; type: 'coverage_min'; coverage: string; segment: number }
-  | { id: string; key: string; type: 'staff_required'; task: number };
-```
+**IR contents.**
+- **Tasks**: teacher slots of classes in scope, plus candidate desk-shift copies (one per template × allowed start × day × studio × lane up to coverage target).
+- **Eligible people per task**: selector and skills, availability, time off, studio, and person `state`.
+- **`fixed_busy`** intervals: every existing claim outside the scope, including **mirrored class assignments**.
+- **Coverage segments**, **hard groups** (each with a stable ID that maps back to its constraint key and scope), **soft terms**, `time_limit_s` and `seed`.
 
-## 8.4 Mapping constraints to CP-SAT
+**Variables.** A Boolean `x[p,t]` for each task *t* and eligible person *p*, each with an optional interval `[occ_start, occ_end)`.
 
-**Decision variables.** For each task *t* and each eligible person *p*: a Boolean `x[p,t]`. Each has an **optional interval** `I[p,t] = [start_t, end_t)` that is present iff `x[p,t]`.
-
-| Rule | CP-SAT encoding | Level |
+| Rule | Encoding | Level |
 |---|---|---|
-| A session requirement slot gets exactly one person | `Σ_p x[p,t] == 1` (`staff_required`). If relaxed in repair mode: `Σ_p x[p,t] + u_t == 1`, where `u_t` (unstaffed) is penalised by 10⁶ | hard |
-| Shift candidate takes at most one person per copy | candidates are duplicated per possible headcount; `Σ_p x[p,t] ≤ 1` | hard |
-| A person fills at most one slot of the same session | `Σ_{t ∈ slots(s)} x[p,t] ≤ 1` | hard |
-| **No overlap for a person**, across all domains | `AddNoOverlap({I[p,t]} ∪ fixed_busy[p] as fixed intervals)` | hard |
-| Availability, time off, skills, roles, `allowed_hours`, `people_where`, hard `assignment_expr` | domain filtering when `eligible` is built: no variable is created | hard |
-| `min_rest` | for each task pair (a, b) with gap < rest: `x[p,a] + x[p,b] ≤ 1`; and `x[p,a] == 0` if it is too close to a fixed busy interval | hard |
-| `transfer_time` | the same pairwise encoding for pairs at different locations with gap < transfer | hard |
-| `max_hours` (day / week / rolling 7d) | `Σ_t dur_t · x[p,t] + fixed_minutes ≤ H·60` per window | hard |
-| `max_assignments` | `Σ x[p,t] ≤ count` per window | hard |
-| `max_consecutive_days` | `w[p,d] = max_t∈day(d) x[p,t]` (`AddMaxEquality`); for every window of k+1 days: `Σ w ≤ k` | hard |
-| `shift_length` | candidate generation only emits allowed durations | hard |
-| Coverage minimum | per segment: `Σ_{t ∈ candidate_tasks, p} x[p,t] ≥ min` | hard or soft |
-| Coverage target shortfall | `short_seg ≥ target − Σ …`, `short_seg ≥ 0`; cost `weight · short_seg · seg_minutes` | soft |
-| `min_hours` | `under_p ≥ H·60 − Σ dur·x`; cost `weight · under_p` | soft |
-| `fairness` | load `L_p = Σ metric_t · x[p,t]` over eligible people; `hi ≥ L_p`, `lo ≤ L_p`; cost `weight · (hi − lo)` | soft |
-| `preferences` | cost `+weight` per avoided interval worked, `−weight/2` per preferred interval worked | soft |
-| `continuity` | cost `weight · (1 − x[continuity_person, t])` | soft |
-| `stability` | cost `weight · (1 − x[published_person, t])` for tasks already published | soft |
-| soft `assignment_expr` | cost `weight · x[p,t]` where the expression is false | soft |
+| Teacher slot filled | `Σ_p x[p,t] == 1` (a repair solve may relax this with a penalised slack) | hard |
+| Shift copy | `Σ_p x[p,t] ≤ 1` | hard |
+| No overlap per person, across classes, shifts, blocks and mirrored claims | `AddNoOverlap(intervals[p] ∪ fixed_busy[p])` | hard |
+| Skills, roles, availability, time off, `people_where`, hard `assignment_expr` | Domain filtering (no variable is created) | hard |
+| `min_rest`, `transfer_time` | `x[p,a] + x[p,b] ≤ 1` for task pairs too close together (and against `fixed_busy`) | hard |
+| `max_hours` / `max_assignments` | `Σ dur·x + fixed ≤ limit` per window | hard |
+| `max_consecutive_days` | Day indicators with `AddMaxEquality`; sliding windows | hard |
+| Coverage minimum | `Σ x ≥ min` per segment | hard / soft |
+| Coverage target, `min_hours` | Shortfall variables × weight | soft |
+| Fairness | `weight · (max L_p − min L_p)` | soft |
+| Preferences / continuity / stability | Penalty when the preferred, previous or published person is not chosen | soft |
 
-**Objective:** minimise `Σ soft costs` (integer, in minutes × weight). Solver parameters: `num_workers = 8`, `random_seed` from the request, `max_time_in_seconds` from the request, and `log_search_progress` captured in the job record. **Determinism:** the same IR, seed and worker count gives the same solution with `interleave_search = true`. CI checks this.
+The objective minimises the integer sum of soft costs. Solves are deterministic for a given IR, seed and worker count (`interleave_search`), and CI checks this.
 
-## 8.5 Infeasibility reporting
+## 8.4 Infeasibility reporting
 
-1. **Pre-solve pigeonhole checks** (TypeScript, milliseconds). For each coverage segment, count the people who are eligible and not otherwise busy. If that count is below `min`, report directly: "Fri 17:30–23:00 needs 5 servers; only 4 are available and qualified (Ana and Ben have time off)."
-2. **Assumption literals.** Each `HardGroup` *g* gets an enforcement literal `a_g`, and its constraint is added with `OnlyEnforceIf(a_g)`. All `a_g` are passed as assumptions. If CP-SAT returns `INFEASIBLE`, `SufficientAssumptionsForInfeasibility()` gives a subset *C*.
-3. **Minimisation.** A deletion-based pass: for each *g* in *C*, re-solve with *C* \ {g} under a 2 s limit. If the result is still infeasible, drop *g*. The total budget is 30 s. The result is a minimal (or, at the time limit, near-minimal) conflicting set.
-4. **Report.** Each group maps back to the constraint key, its `description` and its scope (person, date, coverage segment):
+1. **Pre-solve pigeonhole check.** For each coverage segment or teacher slot, if fewer eligible, free people exist than are needed, report it directly. Example: "Hot 75 Tue 18:00 needs a teacher with `hot_cert`; the only two are on time off."
+2. **Assumptions.** Each hard group runs under `OnlyEnforceIf(a_g)`. If the solve is `INFEASIBLE`, `SufficientAssumptionsForInfeasibility()` returns a core.
+3. **Minimisation.** Deletion-based: drop one group at a time and re-solve with a 2 s limit each, within a 30 s total budget.
+4. **Report.** Each conflict lists its constraint key, its description, its scope (person, date or segment), and **suggestions** from a fixed rule table. Suggestions never come from an LLM.
+5. **Best-effort mode** (requested by a manager): coverage minimums become heavily weighted soft terms, unmet items are listed, and the result cannot be auto-approved.
 
-```json
-{ "status": "infeasible",
-  "conflicts": [
-    { "constraint": "servers", "scope": "Fri 13 Nov 17:30–23:00 Mission", "text": "needs 5 servers" },
-    { "constraint": "weekly_40", "scope": "Ana, Ben, Chloe (week of 9 Nov)", "text": "max 40 h/week" },
-    { "constraint": "no_clopen", "scope": "Dev, Eli (Fri 13 → Sat 14 Nov)", "text": "10 h rest" } ],
-  "suggestions": [ "Lower the Friday dinner minimum to 4", "Allow overtime for 1 person",
-                   "Add a server to the roster" ] }
+## 8.5 Shared person-rule validator (authoritative)
+
+`@kairos/engine/person-rules` runs on **every** person assignment write: solver proposals, manager edits, swaps, substitutes, and lifecycle vacates/re-assigns. Mirror ingestion also runs it, but only to report problems. It checks:
+
+- the selector;
+- skills and expiry;
+- person `state`;
+- availability and time off;
+- occupancy;
+- `min_rest`, `transfer_time`, `max_hours`, `max_assignments`, `max_consecutive_days` and hard `assignment_expr`, against the person's claims in every domain and from every source.
+
+**Race safety.** Rules that depend on neighbouring claims are protected by **per-person-day version rows**. The commit batch includes, for every local day the rule windows touch:
+
+```sql
+UPDATE resource_day SET version = version + 1, last_batch = :batch_id
+ WHERE resource_id = :p AND day = :d AND version = :v_read;
+INSERT INTO batch_assert (ok) VALUES (
+  (SELECT last_batch FROM resource_day WHERE resource_id = :p AND day = :d) = :batch_id);
 ```
 
-Suggestions come from a fixed rule table (for example "a coverage min is in the core → suggest lowering it"). They are **not** written by an LLM. The staff assistant may phrase them in words, but cannot add new ones.
+A `resource_day` row is created on first use (`INSERT … ON CONFLICT DO NOTHING` in the read phase). If a concurrent batch has bumped the version, this batch's UPDATE matches no row, `last_batch` stays different, and the batch aborts. The engine then re-reads, re-validates, and retries up to 3 times before failing with `STALE_VERSION`.
 
-5. **Best-effort mode.** Managers can ask for a "best possible" roster. Coverage minimums become soft with weight 10⁵, and `staff_required` slots become relaxable. Unmet items are listed explicitly. The proposal cannot be auto-approved.
+A solver result that fails the validator is a **bug**: it is not committed, and an alert is raised.
 
-## 8.6 Shared person-rule validator (authoritative)
+**Two managers editing the same roster.** Each proposal has a `version`, and edits require `If-Match`. Two proposals that touch the same person-days can both be *created*. When the second one is *applied*, its `resource_day` guards fail, it re-validates against the first one's committed state, and it either applies or fails with reasons.
 
-`@kairos/engine/person-rules` is one TypeScript module. **Every** write that assigns a person runs it: solver proposals, manager edits, swaps, substitute acceptances, `auto` and `customer_choice` bookings, and mirror ingestion (where it only reports). It checks:
+## 8.6 Instructor sick call
 
-1. the selector (role, skills not expired, `where`);
-2. availability and time off;
-3. occupancy (no overlap; the database also enforces this);
-4. `min_rest`, `transfer_time`, `max_hours`, `max_assignments`, `max_consecutive_days`, `allowed_hours`, and hard `assignment_expr`, against the person's claims in the relevant windows across **all domains and sources**.
+The trigger is a `TimeOff` with `reason: sick, immediate: true`. It can come from the teacher (portal or phone app), from a manager, or from the staff assistant acting on the teacher's instruction.
 
-Rules that depend on neighbouring claims (rest, transfer, hours) can't be expressed as a unique key. They are made race-safe by **per-person-day version rows**. The validator reads `resource_day.version` for every local day its windows touch. The commit batch includes `UPDATE resource_day SET version = version + 1 WHERE resource_id = ? AND day = ? AND version = ?` for each one, followed by an assert row. If a concurrent write changed any of those days, the batch aborts. The engine then re-reads, re-validates and retries up to 3 times (`STALE_VERSION`).
+1. **Vacate (one batch).** The time off is recorded. Every overlapping confirmed assignment (classes and desk shifts) is `released`, and its claim is released. The session goes to `needs_staff`, and `assignment.vacated` is emitted. Members keep their bookings.
+2. **Candidates (deterministic).** `GET /sessions/{id}/substitutes?requirement=teacher` runs the validator over everyone who matches the selector. It returns those who pass every hard rule, ranked by soft score (preferences, fairness by minutes this week, continuity with this template, and `rank`), each with `why` facts.
+3. **Outreach (H3, §10.4).**
+   - Offers are created with `POST /offers {kind: substitute}` and delivered through the notification service.
+   - The top `k = 3` candidates are asked at once, because a sick call is urgent. Each offer expires at `min(now + 20m, deadline)`; if the class starts within 6 h, the offer lasts 10 min (D-33).
+   - When an offer is declined or expires, the next candidate is asked. Candidates are re-fetched before each wave.
+4. **Accept → proposal.** The candidate answers `POST /offers/{id}/accept` (button in the phone app), or replies by SMS. In the SMS case, H3 interprets the text and records an accept on their behalf, with the text attached for the manager. Either way, a `Proposal{assignment_change}` is created and validated at once. All other open offers for the slot are withdrawn.
+5. **Approve → commit.** A manager approves in the portal or desk app, or the proposal auto-approves if the flag `substitute.auto_approve` is on and the candidate passes every *soft* rule too. The commit re-validates (I-27). The assignment becomes `confirmed`, the session `scheduled`, and `assignment.confirmed{reason: substitute}` is emitted, which triggers the `sub_assigned_notice` workflow to members. If the candidate became busy in the meantime (`RESOURCE_CONFLICT`), the proposal goes to `failed` and outreach continues.
+6. **Unapproved proposals** expire at `expires_at`, which defaults to `min(deadline, now + 2h)` (I-28a). Outreach then continues.
+7. **No substitute.** At the hook's deadline, the hook emits `custom.substitute_exhausted`, and the tenant's workflows create a manager task. At `policy.unstaffed.check_at`, if the slot is still empty, the **built-in** unstaffed check (§7.1) cancels the class with `reason: no_staff`. Every booking is cancelled with a full refund and units released (§7.6, studio cancel). The `no_sub_notice` workflow texts members, and waitlist entries expire.
+8. **Multi-day absence.** If the time off vacates more than 3 slots, or slots on more than 1 day, a `repair` solve runs as well. Only the vacated slots are variables, everything else is fixed, and stability has a high weight. The solve returns one coherent multi-slot proposal.
+9. **Mirror mode for classes.** The commit in step 5 is a **write-through** of the teacher change to BookingVendor (§18.4). The mirrored claim is updated from BookingVendor's response. A cancellation in step 7 is also written through.
 
-A solver solution that fails the validator is treated as a **bug**. It is not committed, the job is marked `invalid_solution` with the failing rule, and an alert is raised.
+## 8.7 Committing a roster
 
-## 8.7 Disruption repair: an instructor's sick call
+A roster commit is a **saga**:
 
-The trigger is a `TimeOff` with `reason = sick` and `immediate = true`, created by the instructor (portal or phone app), by a manager, or by the staff assistant on the instructor's instruction.
+1. Group the ops by person. Each person's ops go in one guarded batch: `resource_day` guards, occupancy changes and assignments.
+2. Apply the batches in person-ID order.
+3. If any batch fails, compensate the batches already applied (release their new claims, restore their old assignments). The proposal goes to `failed` and lists the conflicting person-days.
 
-1. **Effect (one batch):** the time off is recorded. Every confirmed assignment of that person overlapping it is set to `released`, and its claim is released. Each affected session's assignment slot becomes open, the session goes to `needs_staff`, and `assignment.vacated` is emitted per slot. Desk shifts the person had in the window are vacated the same way. Bookings are untouched: members keep their places.
-2. **Candidates (deterministic, no solver):** `GET /sessions/{id}/substitutes?requirement=instructor` evaluates every person who matches the selector with the validator (§8.6). It returns those who pass every hard rule, ranked by a score computed from the tenant's soft constraints: preferences, fairness (fewer minutes this week ranks higher), continuity (has taught this template before), and `rank`. Each candidate carries `why` facts, for example `{ taught_template_before: 14, minutes_this_week: 180, preference: 'none' }`.
-3. **Outreach (substitute finder hook, §10.4):** the agent asks candidates in rank order through the notification service. Each offer has an expiry. Offers are batched: by default the top 3 are asked at once, because a sick call is urgent, and acceptance is first-come.
-4. **Accept → proposal:** a candidate's "yes" creates a `Proposal{kind: assignment_change, ops: [{op: 'assign', session, requirement: 'instructor', resource: cand}]}`, which is validated at once.
-5. **Approve → commit:** a manager approves in the staff portal or desk app, or the policy auto-approves if the tenant enabled `auto_approve_substitutes` and the candidate passes every *soft* rule too. The commit re-validates (I-27). If the candidate has meanwhile become busy (`RESOURCE_CONFLICT`), the proposal goes to `failed`, and outreach continues with the next candidate.
-6. **Deadline:** at the workflow's `deadline` (e.g. start − 2 h), if no one has been assigned, the configured fallback runs: the tenant's workflow (for example cancel the session with refund and notify members), or a manager task.
-7. **Multi-day absence:** when one time-off vacates more than 3 sessions, or vacates sessions over more than 1 day, the engine also starts a `repair` solve. Only the vacated slots are variables, everything else is `fixed_busy`, and `stability` gets a high weight. This produces one coherent multi-session proposal. Outreach for the vacated slots then follows the solver's suggestion first.
+**Before the commit:** the staleness guard (§18.6) pulls the classes mirror for every affected person-day.
 
-If the `classes` domain is in mirror mode, step 5's commit is a **write-through** to the outside booking system (change of instructor). The local mirror is updated from the outside system's response (§18.4).
+**After success:** emit `roster.published`, notify affected staff, and update calendar sync (§18.3).
 
-## 8.8 Field service routing
+## 8.8 Performance targets
 
-The nightly `request_solve` (HVAC example) builds a `route` IR. Nodes are jobs with time windows and service durations. Vehicles are technician + van pairs. Constraints include skills (domain filtering), territory (soft: a penalty per job outside territory), maximum day length and the travel matrix. The worker uses the **OR-Tools routing library** (`RoutingModel` with time dimension, disjunctions only for jobs explicitly allowed to be dropped, which by default is none), `GUIDED_LOCAL_SEARCH`, and a 60 s limit. It starts from the current planned routes (I-31), so the result is never worse than the current feasible plan. The validator checks the result, which becomes a proposal with an auto-approval rule, and at commit planned claims move in one saga.
-
-## 8.9 Committing a roster
-
-Publishing a roster (or a large repair) touches many people. The commit is a **saga**:
-
-1. Group the operations by person. Each person's operations go in one guarded batch, with `resource_day` version guards, occupancy inserts and deletes, and assignment rows.
-2. Apply the groups in a deterministic order (by person ID).
-3. If any group fails (someone became busy, for example because a mirrored class was newly imported), the groups already applied are compensated: their new claims are released and their old assignments restored, so the proposal applies **all or nothing** (I-27). The proposal goes to `failed`, listing the conflicting person-days. The manager can re-solve with one click, and the new solve includes the new fixed busy intervals.
-4. On success: `roster.published`, outbox notifications to every affected person, and a calendar-sync update.
-
-## 8.10 Performance targets
-
-| Problem | Size | First feasible | Returned by (time limit) |
+| Problem | Size | First feasible | Time limit |
 |---|---|---|---|
-| Desk-shift roster (reference tenant) | 3 studios, 2 weeks, 25 desk staff, 4 shift templates | ≤ 2 s | 15 s |
-| Instructor schedule | 3 studios, 1 week, 180 class slots, 40 instructors | ≤ 5 s | 30 s |
-| Restaurant | 1 site, 2 weeks, 45 staff | ≤ 5 s | 30 s |
-| Field routing | 15 technicians, 120 jobs/day | ≤ 10 s | 60 s |
-| Repair (sick call, multi-day) | ≤ 20 vacated slots | ≤ 1 s | 5 s |
-| Feasibility probe (config validation) | 2 weeks | — | 20 s |
-| Infeasibility core + minimisation | — | — | +30 s |
-| Substitute candidates (no solver) | 1 slot, 60 people | — | p95 300 ms |
+| Desk roster | 3 studios × 2 weeks, 25 desk staff, 3 shift templates | ≤ 2 s | 15 s |
+| Teacher schedule | 3 studios × 1 week, 180 class slots, 40 teachers | ≤ 5 s | 30 s |
+| Repair (sick call) | ≤ 20 vacated slots | ≤ 1 s | 5 s |
+| Feasibility probe | 2 weeks | — | 20 s |
+| Infeasibility core | — | — | +30 s |
+| Substitute candidates | 1 slot, 60 people | — | p95 300 ms |
 
-Hard cap: 120 s per job. The result reports `status ∈ {optimal, feasible, infeasible, unknown}` and the optimality gap.
+The hard cap is 120 s per job. When a solve exceeds its limit, it returns the best solution found (`feasible`) with its optimality gap, or `unknown` if it found none. On `unknown`, the portal offers best-effort mode, a longer limit (up to the cap), or a narrower scope. Solver times are recorded per job and shown on the operations dashboard (§13.9).

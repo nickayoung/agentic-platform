@@ -1,124 +1,95 @@
-# Appendix A. Acceptance-test walkthrough
+# Appendix A. Acceptance-test walkthrough (yoga scope)
 
-This appendix checks the spec against the acceptance test. It uses only the schema (§4), the example configs (§4b, §18.2) and the engine behaviour in §7–§9 and §12. Where a step relies on a mechanism, the section is cited.
+These checks use only the schema (§4), the reference config (§4b.1) and the engine behaviour in §7–§9 and §12. Each trace is backed by a scenario suite (§14.1).
 
-## A.1 Boutique spin studio, expressed only through the schema (§4b.2)
+## A.1 The reference tenant, expressed only through the schema
 
-| Business requirement | Schema element | Engine mechanism (generic) |
+| Requirement | Schema element | Generic mechanism |
 |---|---|---|
-| One room, 40 bikes in 4 rows | `resources[room_a]` + `layouts[room_a_bikes]` with `generate` | Layout expansion into spot resources (§4.15); places materialised per session (§7.3) |
-| Riders pick a bike | `capacity.mode: mixed`, `base: assigned`, `requirement: room` with `provides_layout` | Place selection (§7.3); `place_claim` primary key (§12.4) |
-| Front row reserved for unlimited members until 24 h before | `partitions[front_row_unlimited]`: `spots.tags_any`, `eligible_if`, `release` | Partition eligibility; release timer and relabelling (§7.3) |
-| 45-minute classes on a weekly timetable | `templates[spin_45]`, `timetable[*]` with RRULE | Materialiser (§3.6 I-11; DST §7.10) |
-| Instructors assigned by roster; Saturday fixed to Maya | `requirements[instructor].assign: roster`; `timetable[sat_0900].fixed.instructor: "@staff:maya"` | Solver (§8.4), validator (§8.6) |
-| Instructor buffers; room turnover | `buffers` on requirements | Widened claims in occupancy (§12.3) |
-| Credits, unlimited membership, drop-in price, first-ride price | `cost.units`, `cost.price`, `price_rules`; `entitlement_products` | Entitlement selection (§7.4.1) |
-| Booking opens 7 days ahead at noon | `booking_window.opens: { before_start: 7d, at_local: "12:00" }` | Calendar offsets (§7.10) |
-| Free cancel until 12 h; then forfeit, plus a $15 fee for members, waived if the bike is re-sold | `cancellation.late` with `fee_if`, `waive_if: booking.place_refilled`, `assess_at: session_start` | Penalty assessment (§7.6) |
-| No-show fee and strike | `cancellation.no_show` | No-show timer (§7.6) |
-| Max 2 rides per day; 6 upcoming for non-unlimited | `limits` | `limit_counter` CHECK (§12.5) |
-| Waitlist: auto-promote until 2 h, then offers until 10 min | `waitlist.schedule` | §7.7 |
-| Cancel if fewer than 3 at T−2 h | `min_attendance` | Built-in (§7.1) + notification workflow |
-| Instructor rules and fairness | `constraints` (max 3 a day, rest, fairness, continuity, preferences) | CP-SAT mapping (§8.4) |
-| Substitute on drop-out | `workflows[sub_finder]` → `invoke_hook` | H3 (§10.4) |
+| Three studios, one zone | `locations` with `timezone` | §7.10 |
+| Mat maps (rows of 6, wall mats, front row) | `layouts` with `generate` and `overrides`; `resources[].layout` | Expanded into spot resources (§4.15); places per session (§7.3) |
+| Dumbo with no map | `pooled_from_space`; `tags: [no_map]`; Vinyasa selector `where` excludes `no_map` | §7.3 |
+| Heated room only for Hot 75, certified teachers | `select.tags_all: [heated]`, `skills_all: [hot_cert]` | Validator (§8.5) |
+| Unlimited-only front row until 24 h before; walk-in mats until 2 h before | `mixed` partitions with `eligible_if`, `online`, `release` | §7.3 |
+| Prenatal capped at 12, intake | `pooled: 12`; `intake.form`; PII custom fields | §7.4 step 10 |
+| First-time hot waiver | `intake.when: customer.history.tags['hot'].completed == 0` | §5.3 history map |
+| Booking opens 14 days ahead at noon | `opens: { before_start: 14d, at_local: "12:00" }` | Calendar offsets |
+| Late and no-show rules with membership fee and refill waiver | `cancellation.late` / `no_show` with `fee_if` and `waive_if` | §7.6 |
+| Refunds | `refund: { timely: full, studio_cancel: full }` | §7.6 |
+| Limits; minimum attendance; unstaffed | `limits`, `min_attendance`, `unstaffed` | Built-in timers (§7.1) |
+| Waitlist auto, then offers | `waitlist.schedule` | §7.7 |
+| Unlimited (freeze), 10-pack, intro month (first use) | `entitlement_products` | §7.4.1, §3.12.5 |
+| Desk shifts and coverage | `kind: shift`, `participants: none`, `rostered`, `coverage` | CP-SAT (§8.3) |
+| Labour and teaching rules | `constraints` | §8.3, §8.5 |
+| Substitute search, member notices | `workflows` | §9 |
 
-Nothing in this list needs code specific to spin studios.
+No business-specific code is involved. The engines never read `kind` (lint, §14.1).
 
-## A.2 Big-box gym: classes and PT sharing rooms and instructors (§4b.3)
+## A.2 Mat-hold race: **Pass**
 
-**What is shared:**
+Two members tap Mat 12 (row 2, a wall mat, `general` partition) for Tue 07:00 Vinyasa in Park Slope Studio 1, within the same 50 ms.
 
-- **Coaches** are person resources with role `coach`. The same person can match `hiit_45.coach` (skill `group_fitness`, assigned by roster) and `pt_60.trainer` (skill `personal_training`, chosen by the customer).
-- **Studio A** is tagged both `group` (classes, claimed `exclusive`) and `pt_capable` (PT, claimed `lane`; its concurrency is 1). The PT zone has 4 lanes.
+1. **Store and constraint.** The place claim is stored in the tenant DB table `place_claim`, whose `PRIMARY KEY (session_id, place_id)` admits one claimant. The SessionGate for this class orders the two requests.
+2. **Member A.** A's batch upserts the place claim with `expires_at = now + 5m` (`hold_ttl`). Its scalar assert `holder_id = A` evaluates to 1. A gets `201` with the hold and the quote.
+3. **Member B.** B's upsert `WHERE` is false because A's hold is live, so nothing changes. B's scalar assert evaluates to 0, the `CHECK (ok = 1)` fails, and the whole batch rolls back. B gets `409 PLACE_TAKEN` with alternatives `[Mat 18, Mat 24]` (equal attributes, nearest first).
+4. **Gate down.** Single-writer SQLite gives the same result.
+5. **A abandons.** At 5 minutes the alarm deletes the claim, marks the hold `expired`, and emits `place.released`. If a waitlist exists, §7.7 applies: the mat is reserved for the waitlist. If the alarm is lost, the 1-minute sweep or the next upsert reclaims the mat.
+6. **A confirms late.** The guard fails. The engine tries one transparent re-hold. If that fails, A gets `409 HOLD_EXPIRED` and the payment authorisation is voided through the outbox.
 
-**Worked case: Tuesday.** Coach Marco has `group_fitness` and `personal_training`. The roster assigned him to HIIT 18:00 in Studio A.
+## A.3 Late cancellation with waitlist promotion: **Pass**
 
-1. When HIIT is staffed, two claims are written:
-   - Marco 17:50–18:50: 45-minute class, 10-minute before buffer, 5-minute after buffer.
-   - Studio A 18:00–19:00: 15-minute turnover.
-2. A member searches PT with Marco, Tuesday 16:00–20:00 (§7.2.3, 30-minute step, 60-minute session plus 10-minute after buffer):
+The full timeline is in §9.6.
 
-   | Start | Marco needs | Marco free? | Rest ≥ 10 min (`coach_rest`) | Space | Offered |
-   |---|---|---|---|---|---|
-   | 16:00 | 16:00–17:10 | ✓ | ✓ (gap to 17:50 is 40) | PT zone lane | ✓ |
-   | 16:30 | 16:30–17:40 | ✓ | ✓ (gap 10) | PT zone lane | ✓ |
-   | 17:00 | 17:00–18:10 | ✗ overlaps 17:50 | — | — | ✗ |
-   | 17:30, 18:00, 18:30 | … | ✗ | — | — | ✗ |
-   | 19:00 | 19:00–20:10 | ✓ (free from 18:50) | ✓ (gap 10) | PT zone lane (ranked first); Studio A also free | ✓ |
+- **Penalty.** The penalty is deferred to session start. It is waived if `place_refilled` is true. Otherwise, depending on what the late canceller paid with: credit forfeited (pack) and/or a $10 fee (membership), charged through the gateway.
+- **Promotion order.** The freed mat is reserved for the waitlist in the same batch that frees it. A new member's hold on it fails. Promotion then goes by position, honouring mat preferences.
+- **Promoted member.** In `auto_promote` mode there is no hold: the member is booked directly and their credit is reserved. In `offer_all` mode the member accepts the offer, then holds and confirms. The hold expires at `min(now + 5m, offer.expires_at + 5m)`.
+- **Promoted member has no credits.** They are `skipped` (`INSUFFICIENT_UNITS`), `skipped_notice` emails them, and the next member is promoted. If nobody is eligible, the reservation is cleared.
+- **Notifications.** The `promoted_notice`, `offer_notice` and `skipped_notice` workflows call the notification service through the outbox, keyed by idempotency key.
 
-3. **The PT zone is full at 14:00** (4 lanes taken). A PT booking at 14:00 gets Studio A's only lane through `select: tags_any [pt_capable]` and the `rank` expression. If a manager then tries to add a one-off class in Studio A at 14:00, the exclusive occupancy insert hits the PT claim's row, and the batch aborts with `RESOURCE_CONFLICT`.
-4. **Rostering respects PT:** when coaches are next rostered, Marco's PT bookings are `fixed_busy` in the IR (§8.3), so the solver cannot give him a class that overlaps a PT client. The soft `protect_pt` constraint also steers classes away from his preferred PT hours.
-5. **Open floor:** hourly open-gym sessions use pooled capacity with a walk-in partition and `occupancy: none` on the floor, so classes and PT never compete with them for resource time.
-6. **Cycle 45:** assigned bikes, with a Premium row released 24 h before. This is the same mechanism as the spin studio.
+## A.4 Instructor sick call: **Pass**
 
-All of this comes from the same primitives as the spin studio. The engine never reads `kind`.
+Maya is rostered for Tue 18:00 Hot 75 at Park Slope. At 12:00 she submits a sick call in the phone app.
 
-## A.3 Spot-hold race
-
-Covered step by step in §7.5.3. In summary:
-
-1. Two riders hold Bike 12 at the same instant.
-2. The SessionGate orders the requests. The first batch's upsert-and-assert wins.
-3. The second gets `409 PLACE_TAKEN`, with equivalent free bikes as alternatives.
-4. With the gate down, SQLite's single-writer batches give the same result.
-5. An abandoned hold is released by an alarm, or overwritten in place after expiry if the alarm is lost.
-6. A late confirm gets one transparent re-hold attempt, or `HOLD_EXPIRED` with the payment authorisation voided.
-
-Tests: §14.1 "Concurrency tests".
-
-## A.4 Late cancellation with waitlist promotion
-
-Covered as a timeline in §9.6:
-
-1. Cara's late cancel frees Bike 7. The front-row partition had already been released, so Bike 7 is now `general`.
-2. The waitlist is in `auto_promote` mode, so Dana (#1, a pack holder, preferring Bike 7) is booked onto Bike 7 in the same SessionGate turn, and her credit is reserved.
-3. At session start, Cara's penalty assessment sees `place_refilled = true`, so the $15 fee is waived. Variants: no refill → charged; pack → credit released when waived; after 16:30 → offers; Dana's own late cancel → both charged if not refilled.
-
-Scenario test: §14.1.
-
-## A.5 Instructor sick call (spin studio, §4b.2; the same flow applies to the gym and the reference tenant)
-
-Instructor Jamie is rostered for Tue 18:30 Spin 45. Candidates with `spin_cert`: Maya, Leo, Ana and Sam.
-
-| Time | Event | Detail |
+| Time | Step | Detail |
 |---|---|---|
-| 13:00:00 | Jamie submits `POST /time-off { reason: sick, immediate: true, start: 13:00, end: 23:59 }` in the phone app | One batch: time off recorded; assignment `released`; claim released (occupancy rows deleted); session → `needs_staff`; `assignment.vacated` emitted; audit (§8.7 step 1). The 40 riders keep their bookings |
-| 13:00:01 | Workflow `sub_finder` | `invoke_hook substitute_finder { session_id, deadline: 16:30 }` (start − 2 h) |
-| 13:00:02 | Hook → `GET /sessions/{id}/substitutes?requirement=instructor` | The validator (§8.6) excludes Sam (`OUTSIDE_AVAILABILITY`, time off). Ranked by soft score: **Leo** (fewest minutes this week, no preference conflict), **Maya** (has taught this slot 14 times; continuity), **Ana** (marked the evening as `avoid`) |
-| 13:00:03 | Offers to the top 3 in parallel (urgent) via `send_offer` → notification service | Expiry 13:30; the quiet-hours check passes |
-| 13:06 | Maya replies "yes, happy to" | Interpreted as accept → `Proposal{assign Maya}` → validated at once (passes) → manager notified; Leo's and Ana's offers withdrawn ("filled, thanks") |
-| 13:20 | Manager approves in the staff portal | Commit re-validates (I-27). The batch inserts Maya's claim 18:20–19:25 (with buffers) and bumps `resource_day` versions → assignment `confirmed`; session → `scheduled`; `assignment.confirmed` |
+| 12:00:00 | `POST /time-off {sick, immediate}` | One batch releases Maya's assignment and claim, sets the session to `needs_staff`, and emits `assignment.vacated`. Members keep their bookings. |
+| 12:00:01 | `sub_finder` workflow → H3 | Deadline = 18:00 − 90 min = 16:30 |
+| 12:00:02 | **Candidate query** `GET /sessions/{id}/substitutes?requirement=teacher` | The validator keeps only `teacher` people with an unexpired `hot_cert` who are available, have no overlapping claim in any domain (including desk shifts and mirrored classes), and satisfy `teach_rest`, `teach_day` and transfer time. Ranked: Leo (fewest minutes this week), Ana (has taught this slot 9 times), Ravi |
+| 12:00:03 | **Outreach** `POST /offers` ×3, in rank order, at once | The class starts within 6 h, so each offer expires at 12:10 (D-33). Messages go through the notification service. No quiet hours apply. |
+| 12:10 | All three offers expire | The next wave fetches candidates again. None are left, so the run ends `exhausted` and emits `custom.substitute_exhausted`. A manager task is created. |
+| *(Alternative)* 12:04 | Ana taps Accept (`POST /offers/{id}/accept`) | A `Proposal` is created and validated. The other offers are withdrawn. The proposal `expires_at` is 14:00 (`min(16:30, now + 2h)`). |
+| *(Alternative)* 12:15 | Manager approves | Re-validation passes (with the `resource_day` guards and a scalar assert). Ana's claim is written, the session returns to `scheduled`, and `sub_assigned_notice` notifies members. If Ana became busy before approval, the commit fails with `RESOURCE_CONFLICT`, the proposal moves to `failed`, and outreach continues. |
+| 16:30 | **Unstaffed check** (built-in, `unstaffed.check_at: 90m`) | The slot is still empty, so the class is cancelled with `reason: no_staff`. **Members:** every booking is cancelled, credits are released, price-paid bookings get full refunds through the gateway, waitlist entries expire, and `no_sub_notice` texts everyone. |
 
-**Variants:**
+With classes in mirror mode (Phases 1–2), the approve step and the cancellation are written through to BookingVendor.
 
-- *Maya was assigned elsewhere between 13:06 and 13:20* (for example a manager added her to a 18:00 class): the commit's occupancy insert or validator fails with `RESOURCE_CONFLICT`. The proposal goes to `failed`, and the hook continues with Leo (and Ana if needed).
-- *No acceptance by 16:30:* the hook ends `deadline_passed`, a manager task is created, and `custom.substitute_exhausted` is emitted. The tenant's workflow (for example cancel with refund, as in §18.2) runs.
-- *Jamie is out all week:* more than 3 vacated slots → a `repair` solve with stability weighting proposes one coherent set of substitutions (§8.7 step 7).
-- *Classes domain mirrored* (reference tenant, phases 1–2): the approved commit is a write-through instructor change to BookingVendor. The mirrored claim is updated from the response.
+## A.5 Classes mirrored, desk shifts owned: **Pass**
 
-## A.6 Mirror classes + owner desk shifts at the same time, without double-booking a person
+Configuration: Phase 1, with `classes = mirror` and `shifts = owner`.
 
-**Configuration in force:** reference tenant, phase 1 (§18.9). `classes = mirror` (BookingVendor), `shifts = owner`.
+**Order 1: class known first.**
 
-**1. Mirrored class arrives.** BookingVendor emits `class.updated` for Tue 09:00 Vinyasa 60 at Park Slope, instructor = Priya (staff key `priya`). `kairos-sync` maps it (`VIN60` → `vinyasa_60`, room → `ps_studio_1`) and calls `kairos-core` `POST /internal/mirror/apply`. One batch:
-- upserts the session (`source = mirror`) and the `external_ref`;
-- upserts an assignment for requirement `instructor` → Priya;
-- writes **claim C1** on Priya's resource: 08:50–10:10 (10-minute buffers from the template), `source = mirror`, `domain = classes`, with occupancy rows for grains 08:50–10:10 at lane 0. This uses `ON CONFLICT DO NOTHING`, and all rows insert because nothing else holds that time.
+1. BookingVendor sends `class.updated` for Tue 09:00 Vinyasa at Park Slope, instructor `BV-1187`. `kairos-sync` dedupes the event and maps it: `VIN60` → `vinyasa_60`, room → `ps_studio_1`, and `person_mapping(booking_vendor, BV-1187)` → Priya (matched by email at onboarding).
+2. It calls `POST /internal/mirror/apply`. One batch upserts the session, the assignment, and **claim C1** on Priya's resource for 08:50–10:10 (10-minute buffers), with `source = mirror`. Exclusive occupancy rows are written.
+3. A manager drags Priya onto Park Slope *Desk – opening* (06:15–12:45). The portal calls `POST /assignments`.
+4. The **staleness guard** pulls Priya's Tuesday from BookingVendor and finds C1 current.
+5. The **validator** sees C1 overlapping and returns `409 RESOURCE_CONFLICT`, with facts `{person: Priya, conflict: "Vinyasa 60 09:00–10:00 Park Slope", source: BookingVendor}`.
+6. **Backstop:** if the validator were bypassed, the occupancy insert would hit C1's row `(priya, grain(08:50), 0)`. The primary-key violation aborts the batch, and nothing is written.
+7. **Solver:** C1 is in `fixed_busy`, so `AddNoOverlap` makes an overlapping desk shift impossible.
 
-**2. Manager tries to roster Priya on the desk.** In the staff portal, the manager drags Priya onto Park Slope *Desk – opening* Tue 06:15–12:45.
-- The portal sends `POST /assignments { session: desk_open@Tue, requirement: worker, resource: priya }`.
-- **Staleness guard (§18.6):** a targeted pull of Priya's Tuesday classes from BookingVendor confirms C1 is current.
-- **Validator (§8.6):** occupancy for Priya on Tuesday shows C1 overlapping 06:15–12:45 → `RESOURCE_CONFLICT`.
-- **Response:** `409` with `reasons: [{ code: RESOURCE_CONFLICT, facts: { person: "Priya", conflict: "Vinyasa 60, 09:00–10:00, Park Slope", source: "BookingVendor" } }]`. The portal shows the message.
+**Order 2: class arrives after the shift.**
 
-**3. Database backstop.** Suppose a bug skipped the validator. The commit batch's exclusive occupancy insert for Priya, 06:15–12:45, collides with C1's row at `(priya, grain(08:50), 0)`. That is a primary-key violation, so the batch aborts, and nothing is written.
+1. Priya already has published desk shift D1 at Park Slope, 06:15–12:45, owned by Kairos.
+2. BookingVendor then assigns her to the 09:00 class.
+3. Ingestion inserts C2's grains with `ON CONFLICT DO NOTHING`. All of them are taken by D1, so C2 is stored as `conflicted`. The engine did not put Priya on the desk during her class; the outside system created the overlap, and Kairos does not refuse an outside record (I-18).
+4. A `cross_domain_conflict` drift item and the `cross_domain_alert` workflow notify managers and create a task within 60 s. The desk app shows the conflict.
+5. No new claim can use Priya's time 08:50–10:10: those grains are held by D1, and C2 keeps them reserved for itself.
+6. The manager resolves it, typically with a proposal that moves Priya's desk shift. D1's release batch re-homes C2's grains, and C2 becomes `active`. D1 is not vacated automatically (D-34, Q-05).
 
-**4. Solver path.** `POST /rosters/solve { scope: { roles: [desk] } }` builds the IR with C1 as `fixed_busy` for Priya. `AddNoOverlap` makes any overlapping desk shift impossible. The solver assigns someone else, or assigns Priya only to shifts that don't touch 08:50–10:10 (for example *Desk – closing* from 12:45). `min_rest` and transfer rules are applied against C1 as well.
+**Order 3: teacher unmapped.**
 
-**5. Reverse order (outside system creates the conflict).** Priya is already on a published desk shift 12:45–21:15 (claim D1, owned). BookingVendor then assigns her to a 17:00 class:
-- Mirror ingestion cannot take grains 16:50–18:10 (held by D1), so the new claim C2 is stored `conflicted`, taking every free grain (none here). Each grain is therefore blocked either by D1 or by C2's own rows.
-- A `cross_domain_conflict` drift item is raised, and the `cross_domain_alert` workflow notifies managers and creates a task.
-- Kairos does not refuse the outside record, because BookingVendor is the record for classes. But no new Kairos claim can use that time. The desk app shows the conflict on today's board.
-- When the manager resolves it, for example by moving Priya's desk shift through a proposal, D1's release batch re-homes C2's missing grains and sets C2 to `active` (§12.3).
+1. `BV-2290` has no mapping, so the class is stored as `needs_mapping` and `unmapped_person` alerts managers.
+2. A manager tries to put anyone on the Park Slope desk overlapping that class. The validator refuses with `RESOURCE_CONFLICT` and the reason "unmapped teacher" (D-26).
+3. After the mapping is fixed, the claim lands on the right person and the normal rules apply.
 
-**Result:** in both orders, the engine never *creates* a state where one person works the desk during a class they teach. When the outside system creates such a state itself, Kairos detects it within the ingestion latency (p95 ≤ 2 min) and escalates it. This holds while classes are mirrored and desk shifts are owned, because both domains write to the same `occupancy` table in the same tenant database (I-17, D-05, D-06).
+In every order, the refusal is enforced by the shared `occupancy` primary key and the shared validator, in the same tenant database, while the two domains are in different modes (I-17, D-05, D-06).

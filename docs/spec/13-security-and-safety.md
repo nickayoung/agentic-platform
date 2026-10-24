@@ -1,75 +1,145 @@
-# 13. Security and safety
+# 13. Security, safety and operations
 
 ## 13.1 Tenant and environment isolation
 
-- **Physical separation.** Each tenant has a separate database per environment. Every request resolves `(tenant_slug, env)` through the control plane to exactly one database binding before any query runs. The database handle is passed into the request context, and no code path builds a binding from user input.
-- **Token checks.** Tokens must carry `tid` and `env` that match the path. A mismatch returns `403 TENANT_MISMATCH` and is audited.
-- **Per-object stores** (SessionGate, TimerObject) are named `"{tenant}:{env}:{object}"`, and each one checks the tenant and environment of every message.
-- **Caches** are keyed by tenant, environment and `config_epoch`. Responses for authenticated users are marked `Cache-Control: private`.
-- **Preview cannot reach production records.** (a) Preview services hold only preview credentials for the gateway. (b) The gateway maps preview identities to the outside systems' sandboxes, or to a `record_only` sink (the call is logged and not forwarded), according to `tenant.environment_guards.preview_outbound`. (c) The gateway rejects any preview-identity call that targets a production endpoint, as a second line of defence. (d) A CI test asserts that the preview gateway configuration contains no production endpoints.
-- **Isolation tests** (§14.1): cross-tenant read and write attempts with forged paths, swapped tokens and replayed idempotency keys must all fail.
+| Layer | Control |
+|---|---|
+| Storage | Each tenant has its own database per environment. A request resolves `(tenant, env)` through the control plane and gets a database handle before it can run any query. No code builds a database binding from user input. |
+| Tokens | The token's `tid` and `env` must match the path. A mismatch returns `403 TENANT_MISMATCH` and is audited. |
+| Per-object stores | Each object is named `"{tenant}:{env}:{object}"` and checks the tenant and environment of every message. |
+| Caches | Keyed by tenant, environment and `config_epoch`. Authenticated responses are `Cache-Control: private`. |
+| Agents | Agent tokens are minted per tenant. Prompts and hook inputs contain one tenant's data only. Hook runs are stored in that tenant's `kairos-agent` database. |
+| Logs | Every log line carries `tenant` and `env`. The log store is partitioned by tenant, and people with support access see only the tenants assigned to them. Request bodies of member endpoints are never logged. Logs are kept for 30 days. |
+| Solver and simulation | Inputs are pseudonymised. Job payloads are tagged with the tenant and deleted after 7 days. |
+| Preview → production | (a) Preview services hold preview gateway credentials only. (b) The gateway maps preview to the outside systems' sandboxes, or to `record_only` (logged, never forwarded). (c) The gateway rejects any preview call aimed at a production endpoint. (d) CI asserts that the preview gateway config has no production endpoints. (e) Preview is seeded weekly from a **pseudonymised** production copy, with names, emails and phones replaced and processor references removed. |
+
+Isolation tests (§14.1) attack every row of this table.
 
 ## 13.2 Authentication and authorisation
 
-**Human tokens.** Kairos validates JWTs from the member sign-in service and from the staff sign-in service. It checks: signature by JWKS (cached for 10 min, with refresh on an unknown `kid`); `iss`, `aud`, `exp` and `nbf` with ±60 s skew; and the `tid` claim. Roles come from `access.role_mappings` (§4.13). Each mapping can be limited to the locations listed in a claim. The platform has **no passwords and no sessions of its own**.
+**Human tokens.** Kairos accepts JWTs from the member sign-in service and the staff sign-in service. It checks:
+- the signature, using JWKS (cached for 10 minutes, refreshed on an unknown `kid`);
+- `iss`, `aud`, `exp` and `nbf`, with ±60 s of clock skew allowed;
+- `tid`.
 
-**Service tokens.** Other tenant services (desk app back end, portal back end, notification service callbacks, gateway inbound events) get short-lived Kairos tokens from a token-exchange endpoint. They authenticate to it with a client credential stored in their own secret store. Each token is scoped by service and operation.
+On every request, Kairos also checks the person's or member's `state` (cached for ≤ 60 s), so an offboarded or suspended identity stops working within a minute. Roles come from `access.role_mappings`, and each role can be restricted to the locations in a claim.
 
-**Agent tokens.** These are minted by token exchange from the principal's token plus the agent's client credential. They carry `actor.type = agent`, `agent`, `run_id` and `on_behalf_of`, and live for ≤ 15 min. Effective permissions = (permissions of the principal) ∩ (the agent's allowlist).
+**Service and agent tokens.** A service or agent client presents its credential to Kairos's token exchange and receives a token valid for ≤ 15 minutes. The credential lives in the client's own secret store. An agent token carries `on_behalf_of`, and its effective permissions are the intersection of the principal's permissions and the agent's allowlist.
 
-**Permission matrix** (abbreviated; `L` = only within the role's locations, `self` = own records only):
+**Staff who are also members.** These are two identities from two sign-in services. They can be linked (§3.12.5), but their permissions are never merged.
 
-| Capability | owner | admin | manager | desk | instructor/staff | member | config agent | member asst. | staff asst. | sub finder |
+**Permission matrix.** `L` = only within the role's locations. `self` = own records only.
+
+| Capability | owner | admin | manager | desk | instructor / staff | member | config agent | member asst. | staff asst. | sub finder |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Read timetable and spot map | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Timetable, mat map | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Hold, book, cancel | ✓ | ✓ | L | L | — | self | — | self (§10.1) | — | — |
-| Waive penalties | ✓ | ✓ | L | L (≤ policy limit) | — | — | — | — | propose | — |
-| Check in | ✓ | ✓ | L | L | L (own sessions) | self (kiosk) | — | — | — | — |
-| Edit sessions, capacity | ✓ | ✓ | L | — | — | — | — | — | propose | — |
+| Waive penalties | ✓ | ✓ | L | L (≤ 1 credit / $15) | — | — | — | — | propose | — |
+| Check in | ✓ | ✓ | L | L | own classes | self (kiosk) | — | — | — | — |
+| Edit sessions, closures, blocks | ✓ | ✓ | L | blocks (mats) | — | — | — | — | propose | — |
 | Assign staff, publish roster | ✓ | ✓ | L | — | — | — | — | — | propose | propose |
 | Approve proposals | ✓ | ✓ | L | desk-level kinds | — | — | — | — | — | — |
-| Own availability, time off, swaps | ✓ | ✓ | ✓ | self | self | — | — | — | propose for self | — |
+| Own availability, time off, swaps, offers | ✓ | ✓ | ✓ | self | self | own place offers | — | — | propose for self | create substitute offers |
+| Offboard staff | ✓ | ✓ | L | — | — | — | — | — | — | — |
+| Merge, suspend, erase members | ✓ | ✓ | L | — | — | erase / export self | — | — | — | — |
 | Draft config | ✓ | ✓ | — | — | — | — | ✓ | — | — | — |
-| Approve and publish config, rollback | ✓ | ✓ | — | — | — | — | — | — | — | — |
-| Edit `access`, domain modes, flags | ✓ (domain modes: two-person rule) | flags only | — | — | — | — | — | — | — | — |
-| Read PII custom fields | ✓ | ✓ | L | L | own sessions' attendees (configured) | self | — | self | L (desk) | — |
+| Approve, publish, roll back config | ✓ | ✓ | — | — | — | — | — | — | — | — |
+| Access, domain modes, tenant offboarding | ✓ (two-person rule) | — | — | — | — | — | — | — | — | — |
+| Flags, agent clients | ✓ | ✓ | — | — | — | — | — | — | — | — |
+| PII custom fields | ✓ | ✓ | L | L | own classes' attendees (per `visible_to`) | self | — | self | L (desk) | — |
 | Audit log | ✓ | ✓ | L (read) | — | — | — | — | — | — | — |
 
-## 13.3 Data protection
+## 13.3 Personal data
 
-- **No card data, ever.** Payments use the processor's hosted fields or payment pages. Kairos stores only processor references (payment intent and customer IDs), obtained through the gateway.
-- **PII** (customer name, email, phone, custom fields with `pii: true`) is encrypted at the application layer with a per-tenant data key (AES-256-GCM). The key is wrapped by a key in Kairos's secret store and rotated yearly. Lookups use keyed HMAC blind indexes (email, phone).
-- **Minimisation.** Agents, logs and simulations receive pseudonymised or redacted data (§6.4, §10.1). Logs never contain request bodies for customer endpoints.
-- **Erasure.** A deletion request pseudonymises the customer row, deletes custom-field values, and keeps ledger and booking rows under the pseudonym (financial records). An audit entry records the erasure without restating the PII.
-- **Retention:** `custom_fields[].retention` is enforced nightly. Agent transcripts are kept for 30 days.
+| Data | Why it is stored | Retention |
+|---|---|---|
+| Member name, email, phone (encrypted, blind-indexed) | Account, notifications through recipient references, desk lookup | Until erasure. A closed account is erased 2 years after closure unless the member returns |
+| Waivers and consents | Legal record of consent | 7 years after last visit |
+| Intake fields (`pii: true`) such as injuries and due date | Teacher safety | `retention` per field (26–52 weeks) |
+| Bookings, ledger, payment references (processor IDs, never card data) | Financial records | 7 years, pseudonymised after erasure |
+| Staff personal fields | Contact, scheduling | 90 days after offboarding (§3.12.4) |
+| Staff assignments and hours | Payroll and audit | 7 years |
+| Agent transcripts | Debugging, evals | 30 days |
+
+- **Encryption:** application-layer encryption with a per-tenant data key (AES-256-GCM), wrapped by Kairos's secret store and rotated yearly. Destroying the key crypto-shreds the tenant (§3.12.1).
+- **Export and erasure** for members: §3.12.5. Kairos stores no card data at any point (§7.5.4).
 
 ## 13.4 Audit log
 
-- Every state-changing call writes an `AuditEntry` in the same batch (I-29). It records the actor (including `on_behalf_of` and `run_id` for agents), action, target, a hash of the prior state, the new state (PII fields replaced by `‹redacted:field›`), `request_id` and `config_version`.
-- **Hash chain:** `hash = sha256(prev_hash ‖ canonical(entry))`. A daily job verifies the chain and publishes the day's head hash to the archive bucket (write-once retention). Tampering shows up as a chain break.
-- Config publications, approvals, domain-mode changes, flag changes, penalty waivers, ledger adjustments and every agent write are **always** audited, and these entries are never pruned.
+- **What is recorded:** every state change, with the actor (including `on_behalf_of` and `run_id`), action, target, prior-state hash, new state (PII redacted), `request_id` and `config_version`.
+- **Tamper evidence:** each entry's hash is `sha256(prev_hash ‖ entry)`. The chain is verified daily, and the day's head hash is published to a write-once archive.
+- **Never pruned:** config publications, approvals, domain-mode changes, flag changes, waivers, ledger adjustments, agent writes, offboarding and erasure.
+- **Readers:** owner and admin see everything. Managers see entries for their locations. Retention is 7 years.
 
 ## 13.5 Configuration safety
 
-- Locked paths (`access`, environment guards) can't be patched by agents (§4.1).
-- **Fee ceiling:** penalty fees above a tenant ceiling (default 100.00 in the major currency unit) fail validation. Only an owner can raise the ceiling, through a locked tenant setting.
-- **Two-step publish:** an agent drafts, a human approves. Approval is bound to the draft's hash (§6.6).
-- **Flags:** new schema features stay inert behind flags until enabled (I-30). A config that uses a feature whose flag is off validates with the warning `FEATURE_FLAG_OFF`, and that part is inactive.
+- Locked paths (§4.1.1).
+- Fees above `tenant.fee_ceiling` fail validation (`FEE_ABOVE_CEILING`).
+- Agents draft and humans approve. An approval is bound to the draft's hash.
+- A feature whose flag is off stays inert (`FEATURE_FLAG_OFF` warning).
 
-## 13.6 Agent safety (summary of controls)
+## 13.6 Agent safety
 
 | Risk | Control |
 |---|---|
-| Prompt injection through member messages, help articles or email | Content goes to the model as data. The tool allowlist is enforced server-side. Consequential member actions need a member-token confirmation (§11.6). Staff-side changes are proposals only |
-| Agent acts for the wrong member | `on_behalf_of` comes from the member's own token. The API rejects a `customer_id` other than the principal for member-assistant tokens |
-| Agent books beyond the rules | The engine validates everything. Agents have no override parameters, and `waive`/`force` fields are refused for agent tokens |
-| Agent spams staff | Offer and proposal rate limits, quiet hours, fixed templates (§10.4) |
-| Config agent writes unsafe config | Schema boundary, validation, simulation, human approval, locked paths, fee ceiling |
-| Model outage or regression | Every hook has a deterministic fallback (templated explanations; deterministic substitute mode). Booking never depends on an LLM. Model upgrades are gated by evals (§14.4) |
-| Data leaking across members | Hook checkers (§10.3). Member-facing agents can't read other customers or staff contact details |
+| Prompt injection | Untrusted content is passed as data. Allowlists are enforced server-side. Consequential member actions need a member-token confirmation. Staff changes are proposals only |
+| Acting for the wrong member | `on_behalf_of` comes from the member's own token. Member-assistant tokens reject any other `customer_id` |
+| Booking beyond the rules | The engine validates everything. The `waive` and `force` fields are refused for agent tokens |
+| Spamming staff | Offer limits, quiet hours and fixed templates |
+| Unsafe config | Schema boundary, validation, simulation, approval, locked paths, fee ceiling |
+| Model outage or regression | Deterministic fallbacks; eval gates on model changes |
+| Leakage between members | H2 checker. Member-facing agents can't read other members' data or staff contact details |
 
-## 13.7 Abuse and availability
+## 13.7 Abuse
 
-- **Booking-open rushes:** per-member limit of 5 hold attempts per session per minute, global edge rate limits, and SessionGate ordering. Automated clients are detected by a token-bucket score per member, which degrades them to a challenge in the website, not in the API.
-- Inbound webhooks from outside systems arrive only through the gateway, signed, with their timestamps checked within 5 min.
-- **Service-level objectives:** booking API availability 99.95 % monthly. The SessionGate and the solver worker may degrade without affecting correctness.
+- Each member may make 5 hold attempts per class per minute.
+- Edge rate limits apply in front of the API.
+- Inbound webhooks arrive only through the gateway, signed, and are rejected if their timestamp is more than 5 minutes off.
+
+## 13.8 Failure behaviour
+
+| Component down | What members and staff see | What retries | What can be lost |
+|---|---|---|---|
+| Tenant database | Booking, cancelling and staff writes fail with `503 Retry-After`. Anonymous timetable is served from the edge cache (≤ 15 s old, then a stale banner for up to 10 min) | Clients retry with the same idempotency key | Nothing committed. Desk check-ins queue offline |
+| SessionGate | Nothing visible. Batches go straight to the database | — | First-come ordering during rushes only |
+| TimerObject alarms | Timers fire up to 60 s late (sweep) | Sweep every minute | Nothing |
+| Notification service | Messages delayed | Outbox retries for 24 h, then `dead` plus a manager task | Messages older than 24 h are not sent, and the failure is visible in the task list |
+| Gateway | Mirror-mode writes: `OUTSIDE_UNAVAILABLE` (§7.12). Owned-mode refunds, fees, pushes and payroll exports are delayed | Outbox retries for 24 h, then `dead` plus an alert | No money moves without a successful gateway call, and every pending money job stays in the outbox |
+| Solver worker | Roster jobs show "pending". Substitute candidates still work (no solver needed) | Job queue | Nothing |
+| LLM provider | Hooks fall back to deterministic mode, so the member assistant falls back to templated answers | — | Nothing |
+
+## 13.9 Observability
+
+- **Logs.** Structured JSON with `ts`, `tenant`, `env`, `service`, `request_id`, `decision_id`, `actor_type`, `route`, `status`, `latency_ms` and `code`. No PII.
+- **Traces.** OpenTelemetry spans for edge function → gate → database batch → outbox → gateway, sampled at 10 %, and at 100 % on errors.
+- **Metrics and alerts** (each alert links to a runbook in `ops/runbooks/<alert>.md`):
+
+| Metric | Alert threshold |
+|---|---|
+| Booking API 5xx rate | > 1 % for 5 min (page) |
+| Hold / confirm p95 latency | > 2× target for 10 min |
+| `PLACE_TAKEN` rate in a rush | Informational only |
+| Invariant checker violations (continuous, production) | Any (page) |
+| Timer lag p95 | > 60 s for 10 min |
+| Outbox backlog / `dead` rows | > 1,000 / any money job |
+| Drift rate / `cross_domain_conflict` / `unmapped_person` | > 0.5 % for 1 h / any / any |
+| Mirror staleness | > 15 min |
+| Solver job failures / timeouts | > 2 in 1 h |
+| Expression error bursts | ≥ 10 per hour per expression |
+
+- **Incident dashboards:**
+  - Booking health: latency, error codes, gate queue depth.
+  - Sync health: staleness, drift, disagreements, push lag.
+  - Async health: timer lag, outbox backlog by target.
+  - Rostering: job runtimes and statuses.
+  - Per-tenant overview.
+- **Measuring performance targets:** synthetic probes every minute (§7.11), plus the load-test gates in §15.
+
+## 13.10 Deploying and rolling back the engines
+
+- **Build:** an immutable build per commit. IaC deploys it to preview first.
+- **Rollout:** a canary per tenant. Preview for 24 h, then one studio's traffic (routed by a location-scoped flag), then everything.
+- **Automatic rollback:** triggered if any page-level alert fires during the canary.
+- **Compatibility:** the edge functions and per-object stores share a protocol version, and every component accepts versions N and N−1. Database schema follows expand/contract (§12.9), so rolling back the code never needs a schema rollback.
+- **Rollback:** redeploy the previous build with one IaC command. Target: ≤ 5 min.
+- **Solver worker:** versioned images, with a rollback to the previous tag. Golden-IR tests must pass before promotion.

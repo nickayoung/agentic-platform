@@ -2,165 +2,171 @@
 
 ## 11.1 Style: REST + JSON, described by OpenAPI 3.1 (D-03)
 
-REST was chosen over GraphQL for these reasons:
+The API is REST, not GraphQL, for five reasons:
 
-- **Edge caching.** The busiest reads (the timetable, the spot map) are cacheable `GET`s keyed by URL and `config_epoch`. GraphQL `POST` queries defeat the edge cache.
-- **Writes are commands, not graph mutations.** Hold, confirm, cancel and approve each need an `Idempotency-Key`, precise error codes and a decision trace. These map directly to REST resources and `POST` actions.
-- **Agent tools.** Every operation becomes one typed tool generated from OpenAPI (`@kairos/agent-tools`). Allowlists work per operation. GraphQL would need field-level allowlisting and cost analysis to give the same safety.
-- **Bounded cost.** Every endpoint has a fixed query plan and a page limit, with no client-defined joins, which matters for single-writer SQLite databases.
-- **Typed contracts.** Zod → OpenAPI → generated TypeScript clients for the three front ends and the native apps. This matches the tenant's "typed service-to-service contracts" rule (§18.3).
+- **Caching.** The busiest reads (the timetable and mat maps) are cacheable `GET`s, keyed by URL and `config_epoch`.
+- **Precise writes.** Hold, confirm, cancel and approve are commands that need idempotency keys, precise error codes and decision traces.
+- **Agent tooling.** Each operation is one typed agent tool with its own allowlist entry.
+- **Bounded cost.** Query cost is bounded on single-writer SQLite.
+- **Generated clients.** Zod → OpenAPI → TypeScript clients for the website, desk app, portal and the native apps.
 
-Over-fetching is handled with `include=` expansions on a few endpoints (`sessions?include=availability,assignments,places_summary`).
+`include=` expansions cover the common joins.
 
 ## 11.2 Conventions
 
-- **Base URL:** `https://api.<platform-domain>/v1/t/{tenant_slug}/{env}/…`. Here `env ∈ {preview, production}`. Every token's tenant and environment claims must match the path (§13.1).
-- **Auth:** `Authorization: Bearer <JWT>` from the member or staff sign-in service, or a service or agent token minted by the Kairos token exchange (§13.2).
-- **Idempotency:** every `POST` that creates or changes state **requires** `Idempotency-Key` (≤ 64 characters). The response is stored for 72 h and replayed for a duplicate key with the same body. A duplicate key with a different body returns `422 IDEMPOTENCY_MISMATCH`.
-- **Concurrency:** mutable resources return `ETag: "v<version>"`. `PATCH` and `PUT` require `If-Match`.
-- **Errors:** `application/problem+json`:
+- **Base URL:** `https://api.<platform>/v1/t/{tenant_slug}/{env}/…`. The token's `tid` and `env` claims must match the path.
+- **Auth:** `Authorization: Bearer <JWT>`. The JWT comes from the member or staff sign-in service, or from Kairos token exchange (service and agent tokens, §13.2).
+- **`Idempotency-Key`** is required on every state-changing `POST`. Responses are replayed for 72 h. The same key with a different body returns `422 IDEMPOTENCY_MISMATCH`.
+- **`ETag` / `If-Match`** apply to mutable resources: sessions, proposals, resources and drafts.
+- **Errors** use `application/problem+json` with `code`, `decision_id`, `reasons[]` and `alternatives[]` (see §11.4).
+- **Pagination** is cursor-based, with `limit ≤ 200`.
+- **Times** are RFC 3339 UTC, plus a `local {date, time, zone}` field in the **studio** zone.
+- **Versioning:** `/v1` stays backwards compatible. Breaking changes ship as `/v2`, with at least 6 months of overlap.
 
-  ```json
-  { "type": "https://docs.kairos.dev/errors/PLACE_TAKEN", "status": 409, "code": "PLACE_TAKEN",
-    "title": "That place was just taken", "decision_id": "dec_01J…",
-    "reasons": [{ "code": "PLACE_TAKEN", "config_path": null, "facts": { "place": "Bike 12" } }],
-    "alternatives": [{ "place_id": "plc_…", "label": "Bike 13" }] }
-  ```
+## 11.3 Endpoints
 
-- **Pagination:** cursor based: `?limit=50&cursor=…`, with `limit` ≤ 200.
-- **Times:** RFC 3339 UTC (`2026-11-03T23:30:00Z`) plus a `local` object `{ date, time, zone }` on session-like resources.
-- **Versioning:** `/v1` is backwards compatible. Breaking changes go to `/v2`, with ≥ 6 months of overlap.
+Roles are listed per group. The full matrix is in §13.2.
 
-## 11.3 Resources and endpoints
-
-### Configuration
-| Method & path | Purpose | Roles / scopes |
-|---|---|---|
-| `GET /config/active` · `GET /config/versions` · `GET /config/versions/{n}` | read config | staff (redacted `access` for non-owners) |
-| `POST /config/drafts` · `GET/PATCH /config/drafts/{id}` (JSON Patch) | edit a draft | owner, admin, config agent |
-| `POST /config/drafts/{id}/validate` · `/simulate` · `/impact` · `/diff` | checks (§6) | owner, admin, config agent |
-| `POST /config/drafts/{id}/submit` | to `awaiting_approval` | owner, admin, config agent |
-| `POST /config/drafts/{id}/approve` · `/reject` | approval | owner, admin (human only) |
-| `POST /config/rollback` `{ to_version, emergency? }` | rollback | owner, admin (human only) |
-| `GET /config/versions/{n}/migration` | migration progress | owner, admin, manager |
-
-### Catalog and resources
-| Method & path | Purpose |
+### Configuration (owner, admin; config agent for drafts)
+| Endpoint | Purpose |
 |---|---|
-| `GET /locations` · `GET /templates` · `GET /entitlement-products` | compiled config views for front ends |
-| `GET /resources?kind=&role=&location=` · `GET /resources/{id}` | people (staff-visible fields) and structural resources |
-| `PATCH /resources/{id}` | people: skills, roles, attributes (manager); structural resources are config-only |
-| `GET/POST /resources/{id}/availability` · `DELETE …/{avl_id}` | staff availability (self or manager) |
-| `GET/POST /time-off` · `POST /time-off/{id}/approve` | time off, including immediate sick calls |
-| `POST /resources/{id}/blocks` | block a resource (maintenance) |
+| `GET /config/active`, `GET /config/versions`, `GET /config/versions/{n}`, `GET /config/versions/{n}/migration` | Read config, versions and migration progress |
+| `POST /config/drafts`; `GET`/`PATCH /config/drafts/{id}` (JSON Patch, `If-Match`) | Create, read and edit drafts |
+| `POST /config/drafts/{id}/validate`, `/simulate`, `/impact`, `/diff`, `/submit` | Check and submit a draft |
+| `POST /config/drafts/{id}/approve`, `/reject` | Approve or reject (human only) |
+| `POST /config/rollback {to_version, emergency?}` | Roll back (human only) |
 
-### Sessions, timetable, places
-| Method & path | Purpose |
+### Catalog, studios, rooms, people
+| Endpoint | Purpose |
 |---|---|
-| `GET /sessions?from=&to=&location=&template_tags=&kind=&assigned_to=&include=` | timetable, shifts and teaching schedules. `assigned_to=me` for the staff portal |
-| `GET /sessions/{id}` · `GET /sessions/{id}/places` | session detail and spot map |
-| `POST /sessions` | create a one-off session (manager, desk) |
-| `PATCH /sessions/{id}` | retime, change capacity, add a note (validated; may need a proposal) |
-| `POST /sessions/{id}/cancel` `{ reason, refund }` | cancel with refunds |
-| `GET /sessions/{id}/roster` | attendee list for the desk (bookings, check-in state, intake flags) |
-| `GET /sessions/{id}/substitutes?requirement=` | ranked valid candidates (§8.7) |
+| `GET /locations`, `GET /templates`, `GET /entitlement-products` | Compiled config views |
+| `GET /policies/{key}/text?locale=` | Rendered policy text, for the website and agents |
+| `POST /locations/{key}/closures {start, end, reason, preview?}` | Studio closure (§3.12.2). Manager |
+| `GET /resources?kind=&role=&location=`, `GET /resources/{id}` | Rooms, desks and people (staff-visible fields) |
+| `PATCH /resources/{id}` | People: skills and expiry, roles, `payroll_ref`, `home_location_key`, `calendar_sync`. Manager |
+| `POST /resources/{id}/blocks {start, end, reason, preview?}`, `DELETE /resources/{id}/blocks/{blk}` | Take a room or mat out of service (§3.12.3). Manager or desk |
+| `POST /resources/{id}/deactivate {effective, reason}`, `POST /resources/{id}/reactivate` | Staff offboarding and rehire (§3.12.4). Manager; also fired by the directory |
+| `GET`/`POST /resources/{id}/availability`, `DELETE …/{avl}` | Availability (self or manager) |
+| `GET`/`POST /time-off`, `POST /time-off/{id}/approve`, `/reject`, `/cancel` | Time off, including immediate sick calls |
+
+### Sessions and mat maps
+| Endpoint | Purpose |
+|---|---|
+| `GET /sessions?from=&to=&location=&template_tags=&kind=&assigned_to=&include=availability,assignments,places_summary` | Timetable; shift and teaching schedules (`assigned_to=me`) |
+| `GET /sessions/{id}`, `GET /sessions/{id}/places` | Session detail and mat map |
+| `POST /sessions` | One-off class or shift (manager, desk) |
+| `PATCH /sessions/{id}` (`If-Match`) | Edit "this one": retime, room, capacity, substitute (§4.7) |
+| `POST /sessions/{id}/cancel {reason}` | Studio cancel |
+| `GET /sessions/{id}/roster` | Attendee list for the desk and the teacher |
+| `GET /sessions/{id}/substitutes?requirement=` | Ranked valid candidates |
 
 ### Booking
-| Method & path | Purpose |
+| Endpoint | Purpose |
 |---|---|
-| `POST /availability/search` | on-demand and arrival-window slot search |
-| `POST /holds` `{ session_id | on_demand{…}, place_id?, customer_id?, intake? }` | hold + quote (+ `confirmation` for agents) |
-| `DELETE /holds/{id}` | release a hold |
-| `POST /bookings` `{ hold_id, payment?: { processor_authorization_id }, confirmation_token? }` | confirm |
-| `GET /bookings?customer_id=me&state=&from=` · `GET /bookings/{id}` | account page, desk |
-| `POST /bookings/{id}/cancel` `{ preview?: boolean, confirmation_token?, waive?: boolean }` | cancel. `preview` returns penalty + confirmation |
-| `POST /bookings/{id}/move` `{ to_session_id, place_id? }` | reschedule = hold new + cancel old, atomic where same policy |
-| `POST /bookings/{id}/attendance` `{ state: attended | no_show, reason }` | staff correction |
-| `POST /check-ins` `{ booking_id | { session_id, customer_id } }` | desk/kiosk check-in (walk-ins use `online:false` partitions) |
-| `POST /sessions/{id}/waitlist` · `DELETE /sessions/{id}/waitlist/me` · `POST /waitlist/{id}/accept` | waitlist |
-| `GET /approvals` · `POST /approvals/{id}/decide` | pending-approval bookings |
-| `GET /decisions/{id}` | decision trace (member: own decisions only, redacted) |
+| `POST /holds {session_id, place_id?, customer_id?, intake?}`, `DELETE /holds/{id}` | Hold, with quote and `confirmation` for agents |
+| `POST /bookings {hold_id, payment?: {processor_authorization_id}, confirmation_token?}` | Confirm |
+| `GET /bookings?customer_id=me&state=&from=`, `GET /bookings/{id}` | Account page, desk |
+| `POST /bookings/{id}/cancel {preview?, confirmation_token?, waive?}` | Cancel; `preview` returns the penalty and a confirmation. `waive` is staff only, never agents |
+| `POST /bookings/{id}/move {to_session_id, place_id?}` | Move to another class |
+| `POST /bookings/{id}/attendance {state, reason}` | No-show correction (staff) |
+| `POST /check-ins {booking_id, client_key}` | Check-in; `client_key` is the idempotency key for the offline queue |
+| `POST /sessions/{id}/waitlist {preferred_place_ids?, auto_charge_consent?, payment_method_ref?}`, `DELETE /sessions/{id}/waitlist/me` | Waitlist |
+| `GET /approvals`, `POST /approvals/{id}/decide` | Booking approvals |
+| `GET /decisions/{id}` | Decision trace (members: own decisions, redacted) |
 
-### Customers and entitlements
-| Method & path | Purpose |
+### Offers
+| Endpoint | Purpose |
 |---|---|
-| `GET /customers/me` · `GET /customers?query=` (staff) · `GET /customers/{id}` | profile, tier, history counts |
-| `PATCH /customers/{id}` | custom fields within `editable_by` |
-| `GET /customers/{id}/entitlements` · `GET /entitlements/{id}/ledger` | credits and memberships |
-| `POST /entitlements` `{ customer_id, product_key, processor_ref }` | grant after purchase (members domain owner) |
-| `POST /entitlements/{id}/adjust` `{ unit, delta, reason }` | staff adjustment (bounded by role) |
+| `POST /offers {kind: substitute, session_id, requirement_key, resource_id, expires_at, note?}` | Substitute offer (substitute finder, manager). Place offers are created only by the engine |
+| `GET /offers?recipient=me&state=sent` | Open offers for a teacher (phone app) or a member |
+| `GET /offers/{id}` | Offer detail |
+| `POST /offers/{id}/accept`, `POST /offers/{id}/decline` | The recipient's own token only |
+| `POST /offers/{id}/reply {text, interpreted}` | Substitute finder records an SMS/email reply |
+| `POST /offers/{id}/withdraw` | Creator or manager |
+
+### Members and entitlements
+| Endpoint | Purpose |
+|---|---|
+| `GET /customers/me`, `PATCH /customers/me` | Profile, home studio, own custom fields |
+| `GET /customers?query=`, `GET /customers/{id}`, `POST /customers` (desk guest) | Staff lookup and guest creation |
+| `POST /customers/{id}/merge {into}` | Merge duplicates (manager) |
+| `POST /customers/{id}/suspend {until?, reason, cancel_future}`, `POST /customers/{id}/unsuspend` | Suspension (manager) |
+| `POST /customers/me/close`, `POST /customers/{id}/close` | Close an account |
+| `POST /customers/{id}/export`, `POST /customers/{id}/erase` | Data subject export and erasure (self or manager) |
+| `POST /customers/me/link-staff {confirm}` | Link a member account to the same person's staff identity (§3.12.5) |
+| `GET /customers/{id}/entitlements`, `GET /entitlements/{id}/ledger` | Credits and memberships |
+| `POST /entitlements {customer_id, product_key, processor_ref}` | Grant (members domain owned) |
+| `POST /entitlements/{id}/adjust {unit, delta, reason}` | Adjustment, bounded by role |
+| `POST /entitlements/{id}/freeze {from, until}`, `POST /entitlements/{id}/unfreeze` | Freeze and unfreeze |
+| `POST /refunds {booking_id, amount, reason}` | Creates a `refund` proposal (partial refunds) |
 
 ### Staff operations
-| Method & path | Purpose |
+| Endpoint | Purpose |
 |---|---|
-| `GET /assignments?resource_id=&from=&to=` | my shifts and classes (portal) |
-| `POST /assignments` · `DELETE /assignments/{id}` | manager edits (validated, §8.6) |
-| `POST /rosters/solve` `{ kind, scope, horizon }` → `202 { job_id }` · `GET /rosters/jobs/{id}` | solver jobs |
-| `POST /swaps` · `POST /swaps/{id}/accept` · `/approve` | shift and class swaps |
-| `GET /proposals?state=` · `POST /proposals` · `POST /proposals/{id}/approve` · `/reject` | proposals (agents create, humans approve) |
-| `GET /desk/now?location=` | who is on the desk now and next, today's sessions with staffing state |
-| `GET/POST /tasks` · `POST /tasks/{id}/complete` | desk checklists and reminders |
-| `GET /hours?from=&to=&resource_id=` · `POST /exports/hours` | hours records and payroll export (§18.8) |
-| `POST /time-clock/punches` | later phase: actual start and end |
+| `GET /assignments?resource_id=&from=&to=` | My shifts and classes, each with `source` |
+| `POST /assignments`, `DELETE /assignments/{id}` | Manager edits (validated, §8.5) |
+| `POST /rosters/solve {kind, scope, horizon}` → `202 {job_id}`, `GET /rosters/jobs/{id}` | Solver jobs |
+| `GET /proposals?state=`, `POST /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/ops` (`If-Match`), `POST /proposals/{id}/approve`, `/reject` | Proposals |
+| `POST /swaps`, `POST /swaps/{id}/accept`, `/approve`, `/withdraw` | Swaps |
+| `GET /desk/now?location=` | Who is on the desk now and next |
+| `GET`/`POST /tasks`, `POST /tasks/{id}/complete` | Desk checklists and manager inbox |
+| `GET /hours?from=&to=&resource_id=`, `POST /hours/{id}/approve`, `POST /exports/hours {period_start, period_end}` | Hours and the payroll export |
+| `POST /time-clock/punches` | Time clock (later phase) |
 
-### Sync, flags, events, audit (admin)
-| Method & path | Purpose |
+### Agents, sync, flags, events, audit, tenant
+| Endpoint | Purpose |
 |---|---|
-| `GET /sync/domains` · `POST /sync/domains/{domain}/mode` `{ mode, outbound_push }` | domain modes (§18.5); owner only, two-person rule for `owner`↔`mirror` |
-| `POST /sync/domains/{domain}/reconcile` `{ window }` | run drift scan |
-| `GET /sync/drift?state=open` · `POST /sync/drift/{id}/resolve` | drift items |
-| `GET /sync/shadow-disagreements` · `PATCH …/{id}` (triage) | shadow mode |
-| `POST /sync/inbound/{system}` | the outside system's events, delivered through the gateway (signed) |
-| `GET/PUT /flags/{key}` | feature flags |
-| `POST /subscriptions` `{ events[], target_service }` | typed event delivery to other services (§18.3) |
-| `GET /audit?target=&actor=&from=` | audit log |
+| `POST /agents/clients {agent, allowlist}`, `DELETE /agents/clients/{id}` | Register or revoke agent clients (owner) |
+| `POST /events/custom {name, data}` | Custom events (agent-scoped names only) |
+| `GET /sync/domains`, `POST /sync/domains/{d}/mode {mode, outbound_push}` | Domain modes (owner; two-person rule, §18.7) |
+| `POST /sync/domains/{d}/reconcile {window}`, `GET /sync/drift`, `POST /sync/drift/{id}/resolve` | Drift |
+| `GET /sync/person-mappings?state=unmatched`, `PUT /sync/person-mappings/{system}/{external_id} {resource_id}` | Person mapping (manager) |
+| `GET /sync/shadow-disagreements`, `PATCH …/{id}` | Shadow triage |
+| `POST /sync/inbound/{system}` | Outside events, delivered by the gateway (signed) |
+| `GET`/`PUT /flags/{key}` | Feature flags |
+| `POST /subscriptions {events[], target_service}` | Typed event delivery to other services |
+| `GET /audit?target=&actor=&from=` | Audit log |
+| `POST /tenant/offboard {mode: hand_back \| close}`, `GET /tenant/exports/{id}` | Tenant offboarding (owner, two-person rule) |
+| `GET /tenant/status` | Onboarding checklist and go-live state |
 
 ## 11.4 Example: hold and confirm
 
 ```http
-POST /v1/t/cadence/production/holds
-Authorization: Bearer eyJ… (member token)
+POST /v1/t/lotus/production/holds
+Authorization: Bearer <member JWT>
 Idempotency-Key: 7c1e…
-Content-Type: application/json
+{ "session_id": "ses_01JB…", "place_id": "plc_01JB…mat12" }
 
-{ "session_id": "ses_01JB…", "place_id": "plc_01JB…bike12" }
-```
-
-```http
 201 Created
-{ "hold_id": "hld_01JB…", "expires_at": "2026-11-03T17:05:00Z",
-  "place": { "id": "plc_01JB…bike12", "label": "Bike 12", "attributes": { "front_row": true } },
+{ "hold_id": "hld_01JB…", "expires_at": "2027-03-08T15:05:00Z",
+  "place": { "id": "plc_01JB…mat12", "label": "Mat 12", "attributes": { "by_wall": true, "front_row": false } },
   "quote": { "payment": "units", "unit": "class_credit", "amount": 1, "entitlement_id": "ent_01J…",
-             "terms": { "free_cancel_until": "2026-11-03T11:30:00Z", "late": "credit forfeited",
-                        "no_show": "credit forfeited, $20 fee for memberships" },
-             "approval_required": false },
+             "terms": { "free_cancel_until": "2027-03-09T00:00:00Z", "late": "credit forfeited",
+                        "no_show": "credit forfeited, $15 fee for memberships" }, "approval_required": false },
   "decision_id": "dec_01JB…" }
-```
 
-```http
-POST /v1/t/cadence/production/bookings
-Idempotency-Key: 9a44…
-{ "hold_id": "hld_01JB…" }
-→ 201 { "booking_id": "bkg_01JB…", "state": "confirmed", … }
+409 Conflict (the other member)
+{ "code": "PLACE_TAKEN", "title": "That mat was just taken", "decision_id": "dec_01JB…",
+  "alternatives": [{ "place_id": "plc_…mat18", "label": "Mat 18" }, { "place_id": "plc_…mat24", "label": "Mat 24" }] }
 ```
 
 ## 11.5 Multi-tenancy
 
-- **Database per tenant per environment** (D-04): the path's `tenant_slug` and `env` select the database binding through the control-plane registry. Code paths cannot reach another tenant's database (§13.1).
-- Tokens carry `tid` (tenant) and `env`. Both must match the path. Service tokens are minted per tenant and environment.
-- Edge caches are keyed by tenant, environment and `config_epoch`.
+- Each tenant has one database per environment, resolved through the control-plane registry before any query runs.
+- Tokens carry `tid` and `env`.
+- Caches, per-object stores and logs are keyed or tagged by tenant and environment (§13.1).
 
-## 11.6 Confirmations (agent-initiated consequential actions)
+## 11.6 Confirmations
+
+When an agent requests an action with money or penalty consequences, the API returns a `confirmation`. It is single-use and bound to the exact action and terms:
 
 ```json
-"confirmation": { "token": "cnf_01JB…", "expires_at": "2026-11-03T17:05:00Z",
-  "binds": { "action": "cancel", "booking_id": "bkg_…", "penalty": { "fee": { "minor": 1500, "currency": "USD" },
-             "forfeit_units": true }, "terms_hash": "…" },
-  "summary": "Cancel Tue 18:30 Spin. It's within 12 hours, so a $15 late fee applies unless your bike is re-booked." }
+{ "token": "cnf_…", "expires_at": "…", "binds": { "action": "cancel", "booking_id": "bkg_…", "penalty": {…}, "terms_hash": "…" },
+  "summary": "Cancel Tue 18:30 Vinyasa. It's within 12 hours, so a $10 late fee applies unless your mat is re-booked." }
 ```
 
-The token is single-use and bound to the exact parameters and the current terms. Redeeming it needs a **member token for the same customer**. Front ends render it as a confirm card. Email and SMS channels send a signed short link to a confirm page on the website. If any bound fact changes before it is redeemed, it fails with `CONFIRMATION_STALE`.
+Only a member token for the same customer can redeem it. In chat, that is a confirm card. In email or SMS, it is a signed link to a confirm page. If any bound fact changes before redemption, it fails with `CONFIRMATION_STALE`.
 
 ## 11.7 Events to other services
 
-Kairos publishes typed domain events (§9.2) to subscribing services through the outbox, with at-least-once delivery and an `event_id` for dedupe. Each event type has a versioned JSON Schema in `packages/contracts`. Events are the only way other services learn about Kairos changes, because no service reads Kairos's database.
+Kairos publishes typed domain events (§9.2) to subscribing services through the outbox, at least once, each with an `event_id`. Each event has a versioned JSON Schema in `packages/contracts`. No service reads Kairos's database.

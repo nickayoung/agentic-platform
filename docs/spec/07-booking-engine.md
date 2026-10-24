@@ -1,284 +1,269 @@
 # 7. Booking engine
 
-The booking engine is the TypeScript package `@kairos/engine`. It runs inside the `kairos-core` edge function, and inside the batch worker for simulation. It is a pure function of `(compiled config, data read through a storage port, request, clock)`. All writes go through the **guarded batch** primitive (§12.2). The engine never calls an LLM.
+`@kairos/engine` is a TypeScript package. It runs in the `kairos-core` edge function, and in the batch worker for simulations. Given (compiled config, data read through a storage port, request, clock), it always returns the same decision. All writes go through **guarded batches** (§12.2). It never calls an LLM.
 
 ## 7.1 Responsibilities
 
-| Operation | Endpoint (§11) | Summary |
-|---|---|---|
-| Timetable availability | `GET /sessions?…&include=availability` | Bookability and free places for scheduled sessions |
-| Slot search | `POST /availability/search` | Free start times for on-demand and arrival-window templates |
-| Spot map | `GET /sessions/{id}/places` | Places with state (free, held, booked, reserved for a partition) |
-| Hold | `POST /holds` | Evaluate, quote, and claim a place or resource time for `hold_ttl` |
-| Confirm | `POST /bookings` | Convert a hold into a booking, with payment |
-| Cancel | `POST /bookings/{id}/cancel` | Timely or late cancellation, with penalties |
-| Waitlist | `POST /sessions/{id}/waitlist` | Join, leave, accept an offer |
-| Check-in / no-show | `POST /check-ins`, internal timer | Attendance and no-show penalties |
-| Explain | `GET /decisions/{id}` | Decision trace |
+| Operation | Endpoint (§11) |
+|---|---|
+| Timetable with availability | `GET /sessions?…&include=availability` |
+| Mat map | `GET /sessions/{id}/places` |
+| Hold (evaluate, quote, claim a place) | `POST /holds` |
+| Confirm | `POST /bookings` |
+| Cancel | `POST /bookings/{id}/cancel` |
+| Waitlist join, leave, accept an offer | `POST /sessions/{id}/waitlist`, `POST /offers/{id}/accept` |
+| Check-in; no-show timer | `POST /check-ins` |
+| Explain a decision | `GET /decisions/{id}` |
 
-**Built-in policy behaviour versus workflows.** Everything declared in a `PolicySet` is carried out by the engine itself: windows, limits, penalties and their deferred assessment, waitlist promotion, minimum-attendance cancellation, approval timeouts. Workflows (§9) add *extra* reactions to the resulting events, such as notifications, tasks or hooks. They never re-implement policy. So a waitlist never needs a workflow to promote it, and a duplicated workflow cannot promote twice.
+**Built-in policy behaviour.** The engine itself carries out everything in a `PolicySet`:
 
-## 7.2 Availability algorithm
+- booking windows and limits;
+- penalties, and assessing them later where the policy defers them;
+- waitlist priority and promotion;
+- partition releases;
+- minimum attendance and the unstaffed check;
+- approval timeouts;
+- refunds.
 
-### 7.2.1 Free-time model
+Workflows (§9) only add reactions such as notifications, tasks and hooks. They never re-implement policy. Two built-in timers run per session:
 
-For each resource *r* and each local day *d* in its zone, the engine builds two arrays over the 288 five-minute grains of that day. On DST days there are 276 or 300 grains, because grains are UTC-based.
+- **Minimum attendance**, at `min_attendance.check_at`. If `booked_count < min`, the session is cancelled with `reason: under_minimum` and refunds per `refund.studio_cancel`.
+- **Unstaffed check**, at `unstaffed.check_at`. If any `roster` requirement is empty, the session is cancelled with `reason: no_staff` (or staff are notified, per the policy).
 
-- `avail_r,d`, a bitset: grains where *r* is available. For people, this is `AvailabilityRecord(available)` minus `unavailable` minus approved or immediate `TimeOff`. For structural resources, it is open rules minus closed rules, intersected with the location's opening hours (§4.10). A child resource's availability is also ANDed with its parent's, so a spot is only available when its room is open.
-- `used_r,d`, a `Uint8Array`: the number of lanes occupied per grain, read from `occupancy` (one indexed range scan per resource-day).
+## 7.2 Availability for classes
 
-A resource can host a new claim on grain *g* when:
+A class is **bookable for member C** when it passes the pipeline (§7.4) up to place selection.
 
-- `exclusive`: `avail[g] && used[g] == 0`
-- `lane`: `avail[g] && used[g] < concurrency`
+- The timetable view runs the checks that don't depend on the member (status, window) once per session. It runs the member-specific checks (eligibility, limits, payment) once per member per request.
+- Free places = `capacity_total − booked_count − active holds − disabled`, split by partition, plus `reserved_for='waitlist'` places, which count as **unavailable** to members who are not waitlisted.
+- Anonymous timetable responses are cached at the edge for 15 s, keyed by session and `config_epoch`.
 
-An interval is free when every one of its grains is free. Bitsets are cached per request. For a 14-day search over 40 resources, that is 40 × 14 × 288 bits ≈ 20 KB, and the checks are word-wise ANDs.
-
-### 7.2.2 Scheduled sessions (timetable and rostered templates)
-
-A session is **bookable for customer C** when it passes the evaluation pipeline (§7.4) up to place selection. The timetable view batches this. It evaluates customer-independent checks once per session (status, window) and customer-dependent checks once per customer per request (eligibility, limits, payment), then joins the two. Free place counts come from `capacity_total − booked_count − active holds`, partitioned. The timetable is cached at the edge for anonymous users for 15 s, keyed by `(session, config_epoch)`. Free-place counts can be stale by up to that TTL, and holds are always authoritative.
-
-### 7.2.3 On-demand slot search
-
-Input: `{ template, location, from_date, to_date, resource_prefs?: { [requirement_key]: resource_id[] }, duration?, customer_id }`.
-
-```
-1. P ← customer-level checks (eligibility, limits, payment possibility); if any hard fail → return [] + reasons
-2. starts ← for each local day in [from,to] ∩ [now+min_lead, now+horizon]:
-              for each open interval of the location that day:
-                 step through it by slot_step, aligned to local midnight
-3. for each requirement R: cand[R] ← compiled_index(R.select) ∩ resource_prefs[R] (if given),
-                                     filtered by selector.where (candidate slot)
-4. for each start s (ascending):
-     need[R] = [s − before_R, s + duration + after_R)          // buffers widen the occupied interval
-     options[R] = { r ∈ cand[R] : free(r, need[R], R.occupancy) && person_rules_ok(r, s) }
-     if a system of distinct representatives exists (each R gets count_R distinct resources,
-        no resource used for two requirements)                  // bipartite matching, |R| ≤ 4
-        → emit slot(s, default_pick = argmax rank per R, alternatives = |options[R]|)
-5. return slots, paginated (default 50), with the default pick per requirement
-```
-
-`person_rules_ok` applies the hard constraints that depend on neighbouring claims: `min_rest`, `max_hours`, `max_assignments`, `transfer_time` and `allowed_hours` (§8.6 has the shared validator). Step 4 is O(starts × Σ|cand|) bitset checks. A typical physio search (14 days, 8 practitioners, 4 rooms) runs about 2,000 × 12 checks in well under 10 ms.
-
-### 7.2.4 Arrival-window templates (field service)
-
-A booking reserves a **window**, not a time. The invariant is:
-
-> **I-31** At all times, for every technician-day there is a *planned route*: an ordered list of jobs with planned starts. Every booked job's arrival falls inside its window, travel times are respected, and every hard person rule holds.
-
-A window *w* on day *d* is offered when the job can be inserted into at least one eligible technician's planned route. The insertion check tries each position, recomputes planned starts with time-window propagation (earliest start = max(window start, previous end + travel)), and checks that every later job still arrives inside its own window. Travel times come from the gateway's travel matrix, cached per `(site, site)` pair (§4.14). The chosen insertion is the one with the lowest added travel. The engine writes the new job's claim, moves the claims of the later jobs it shifted, and bumps the technician-day version, all in **one guarded batch** (§12.2). Planned assignments are `state = proposed`. They become `confirmed` at dispatch, when the nightly route optimisation (§8.8) publishes. The optimiser may reorder and reassign jobs, but must keep I-31.
+Teacher and room availability is not computed per member request. The rostering engine and the validator handle it (§8).
 
 ## 7.3 Capacity modes and places
 
-When a session is created, places are materialised from `participants.capacity`:
+When a session is materialised, its places are created from its capacity mode:
 
-| Mode | Places | Selection at booking |
+| Mode | Places | Selection |
 |---|---|---|
-| `single` | 1 place | That place |
-| `pooled` / `pooled_from_space` | N anonymous places, `place_no` 1..N | The earliest-released free place (so refills go to earlier late cancellations first), else the lowest `place_no` |
-| `assigned` | One place per enabled spot of the layout supplied by the `provides_layout` requirement, with the spot's attributes copied | The requested spot. If none was requested and `auto_assign` is true, the best free spot by layout order (row, then column). If `auto_assign` is false, a spot is required |
-| `mixed` | Base places, each labelled with a partition (`general` by default) | Only places in partitions where `eligible_if` is true for the customer and `online` matches the channel (`online: false` partitions accept only `desk` and `portal` channels with the staff `desk` role) |
+| `pooled` / `pooled_from_space` | N anonymous places | The free place that was released earliest (so refills credit the earliest late canceller), otherwise the lowest `place_no` |
+| `assigned` | One place per enabled mat in the room's layout, copying the mat's attributes | The requested mat. With no request and `auto_assign: true`, the first free mat in layout order (row, then column) |
+| `mixed` | Base places labelled by partition (`general` by default) | Only partitions whose `eligible_if` is true for the member and whose `online` setting matches the channel. `online: false` accepts only the `desk` and `portal` channels with the staff `desk` role |
 
-**Partition release.** For each partition with `release`, the materialiser schedules a timer at the release offset. When it fires, the free places of that partition are relabelled `released_to = <to>`, and a `place.released` event is emitted for each one, which can trigger waitlist promotion. The relabelling is idempotent, because it is keyed by `(session, partition, release)`.
+**Partition release.** A timer fires at each partition's release offset and relabels its free places `released_to = <to>`. Once the release time has passed, the partition behaves as its target permanently. A place freed later is relabelled in the same batch that frees it.
 
-Once a partition's release instant has passed, the partition behaves as its target for good. A place in it that becomes free **later** (for example through a late cancellation) is relabelled to the target in the same batch that frees it. Example: in the spin studio, a front-row bike freed 10 hours before class is in `general`, because the front-row partition was released 24 hours before class.
+**Live capacity changes.** Raising capacity creates new places, which emits `place.released`. Lowering capacity removes only free places; if not enough are free, the session is marked over capacity.
 
-**Capacity changes on a live session** (staff override or config migration) add or remove places in a batch. Removal only takes free places. If too few are free, the session is marked over capacity (§6.8).
-
-## 7.4 Evaluation pipeline (hold and booking)
-
-Checks run in this order. The first hard failure stops the pipeline. Each step appends to the decision trace.
+## 7.4 Evaluation pipeline
 
 | # | Check | Fails with |
 |---|---|---|
-| 1 | Actor may act for this customer (self, staff with role, or agent with `on_behalf_of` = this customer) | `FORBIDDEN` |
-| 2 | Domain routing: if the `bookings` domain is `mirror` or `shadow`, take the write-through path (§7.12) | — |
-| 3 | Session status is `scheduled` (or `needs_staff` when the policy allows booking unstaffed sessions; default allowed) and the session has not started | `SESSION_NOT_BOOKABLE` |
-| 4 | Booking window: `opens ≤ now < closes` | `WINDOW_NOT_OPEN` (with `opens_at`), `WINDOW_CLOSED` |
-| 5 | `template.eligible_if` and `policy.eligible_if` | `NOT_ELIGIBLE` (+ `ineligible_message`) |
-| 6 | No existing booking for this session (I-21). If `customer_overlap = forbid`, no overlapping confirmed booking | `ALREADY_BOOKED`, `CUSTOMER_OVERLAP` |
-| 7 | Every applicable limit has room. Counter keys are listed in §12.5 | `LIMIT_REACHED` (+ limit key, message) |
-| 8 | Payment: entitlement selection (§7.4.1), or a price from `price_rules`/`price` | `NO_ENTITLEMENT`, `INSUFFICIENT_UNITS`, `ENTITLEMENT_CAP_REACHED`, `PAYMENT_REQUIRED` |
-| 9 | Place: the requested spot is free and in an eligible partition; otherwise any eligible free place | `PLACE_TAKEN` (+ alternatives), `PLACE_NOT_ELIGIBLE`, `SESSION_FULL` (+ `waitlist_available`) |
-| 10 | Intake: required custom fields are present | `INTAKE_REQUIRED` (+ field keys) |
-| 11 | Approval: `approval.required_if` | outcome `pending` (not a failure) |
+| 1 | Actor may act for this member (self; staff with a role at this studio; agent `on_behalf_of` this member); member `state = active` | `FORBIDDEN`, `ACCOUNT_SUSPENDED` |
+| 2 | Domain routing: if `bookings` is in mirror or shadow mode, take the write-through path (§7.12). If its `write_freeze` is set, return `WRITE_FROZEN` with `Retry-After` | `WRITE_FROZEN` |
+| 3 | Session is `scheduled` or `needs_staff`, and has not started | `SESSION_NOT_BOOKABLE` |
+| 4 | Booking window: `opens ≤ now < closes` | `WINDOW_NOT_OPEN`, `WINDOW_CLOSED` |
+| 5 | `template.eligible_if` and `policy.eligible_if` pass | `NOT_ELIGIBLE` |
+| 6 | No duplicate booking (I-21). If `customer_overlap = forbid`, no overlapping booking, and for linked staff no overlapping assignment of their own | `ALREADY_BOOKED`, `CUSTOMER_OVERLAP` |
+| 7 | Limits | `LIMIT_REACHED` |
+| 8 | Payment: entitlement selection (§7.4.1), or price | `NO_ENTITLEMENT`, `INSUFFICIENT_UNITS`, `ENTITLEMENT_CAP_REACHED`, `PAYMENT_REQUIRED` |
+| 9 | Place: requested mat is free, not disabled, in an eligible partition, and not `reserved_for='waitlist'` (unless the member holds an active place offer); otherwise any eligible free place | `PLACE_TAKEN` (+ alternatives), `PLACE_NOT_ELIGIBLE`, `SESSION_FULL` (+ `waitlist_available`) |
+| 10 | Intake and waiver fields present | `INTAKE_REQUIRED` (+ field keys) |
+| 11 | Approval required? | outcome `pending` |
 
-The **quote** returned with a hold contains `{ payment: units|price|none, unit, amount, entitlement_id?, price?, terms: TermsSnapshot, approval_required }`. The customer sees the terms (for example "free cancellation until Tue 06:30") before confirming.
+The **quote** contains `{ payment, unit, amount, entitlement_id?, price?, terms: TermsSnapshot, approval_required }`, and is shown to the member before they confirm.
 
 ### 7.4.1 Entitlement selection
 
-1. Candidates are the customer's entitlements that meet all of: `state = active`; valid at `session.start` (`starts_at ≤ start < ends_at`, or open-ended); a grant for the template's unit; `covers` is true; balance ≥ amount, or unlimited; and every cap counter has room.
-2. Order the candidates by `(priority ASC, ends_at ASC NULLS LAST, id)`. Pick the first.
-3. If there are no candidates and payment allows a price, quote the price. If `units_only`, fail with the most specific reason: no covering entitlement → `NO_ENTITLEMENT`; a covering entitlement with too few units → `INSUFFICIENT_UNITS`; a covering entitlement over a cap → `ENTITLEMENT_CAP_REACHED`.
-4. The units are *reserved* at confirm, not at hold. They are re-checked at confirm, and the `CHECK (balance >= 0)` constraint makes over-spending impossible (§12.5).
+1. Candidates are the member's entitlements that cover the session at `session.start` (I-26a), that grant the unit, that `covers` returns true for, that have enough balance (or unlimited), and that have room under every cap.
+2. Order the candidates by `(priority, ends_at ASC NULLS LAST, id)` and pick the first.
+3. If there are no candidates: quote the price when `payment` allows it; otherwise fail with the most specific reason.
+4. Units are **reserved at confirm**. `CHECK (balance >= 0)` makes over-spending impossible.
 
 ## 7.5 Holds and concurrency
 
-### 7.5.1 Mechanisms (defence in depth)
+### 7.5.1 Mechanisms
 
-1. **Database constraints, which are authoritative.** `place_claim` has `PRIMARY KEY (session_id, place_id)`. `occupancy` has `PRIMARY KEY (resource_id, grain, lane)`. Counters and balances have CHECK constraints. Each hold, confirm or cancel is **one guarded batch** that either applies fully or not at all (§12.2).
-2. **SessionGate, for ordering and speed.** This is one per-object coordinator per timetable session, with strongly consistent storage. It:
-   - processes that session's hold, confirm, cancel and waitlist commands **one at a time in arrival order**, so a rush at booking-open time is served first come, first served instead of by retry luck;
-   - keeps a cached free-place map, so it can answer `SESSION_FULL` without touching the database;
-   - sets an alarm for the earliest hold expiry and runs the release batch when it fires.
+1. **Database constraints are authoritative.**
+   - The primary key on `place_claim (session_id, place_id)` allows one claim per place.
+   - The `place.reserved_for` guard protects places held for the waitlist.
+   - CHECK constraints protect balances and counters.
+   - Each operation runs as one guarded batch in which every assert is a scalar subquery (§12.2).
+2. **SessionGate**, one per class, is a per-object store instance. It runs that class's commands one at a time in arrival order (hold, confirm, cancel, waitlist, promotion, timers), caches free counts, and sets an alarm at the earliest hold expiry. If the gate is unreachable, edge functions send batches directly to the database. Correctness is unchanged; only first-come-first-served fairness is lost.
 
-   If the gate is unreachable, edge functions fall back to sending batches straight to the database. Correctness is unchanged; only ordering fairness is lost.
-3. **On-demand holds** (appointments, rooms, jobs) claim resource time in `occupancy` (`claim.owner.type = hold`, `expires_at` set), plus the single place. There is no gate. Contention is low, and the database is the arbiter.
-
-### 7.5.2 The hold batch (assigned spot)
+### 7.5.2 Hold batch
 
 ```sql
--- 1. claim the place unless a live claim exists (an expired hold is overwritten in place)
+-- 1. claim the mat unless a live claim exists (an expired hold is overwritten)
 INSERT INTO place_claim (session_id, place_id, kind, holder_id, customer_id, expires_at)
 VALUES (:session, :place, 'hold', :hold_id, :customer, :now + :ttl)
 ON CONFLICT (session_id, place_id) DO UPDATE
-  SET kind = 'hold', holder_id = excluded.holder_id, customer_id = excluded.customer_id,
-      expires_at = excluded.expires_at
+  SET kind='hold', holder_id=excluded.holder_id, customer_id=excluded.customer_id, expires_at=excluded.expires_at
   WHERE place_claim.kind = 'hold' AND place_claim.expires_at <= :now;
--- 2. assert we own it; batch_assert has CHECK (ok = 1), so a false here aborts the whole batch
-INSERT INTO batch_assert (ok)
-  SELECT holder_id = :hold_id FROM place_claim WHERE session_id = :session AND place_id = :place;
--- 3. record the hold, the decision trace and the audit row
-INSERT INTO hold (...) VALUES (...);
-INSERT INTO decision (...) VALUES (...);
-INSERT INTO audit (...) VALUES (...);
+-- 2. assert: we own it (scalar subquery → exactly one row inserted, never zero)
+INSERT INTO batch_assert (ok) VALUES (
+  (SELECT holder_id FROM place_claim WHERE session_id = :session AND place_id = :place) = :hold_id);
+-- 3. assert: mat is usable by this member (not disabled; waitlist reservation honoured)
+INSERT INTO batch_assert (ok) VALUES ((SELECT p.disabled = 0 AND (p.reserved_for IS NULL OR EXISTS (
+    SELECT 1 FROM offer o WHERE o.session_id = :session AND o.kind = 'place' AND o.state = 'sent'
+      AND o.customer_id = :customer AND o.expires_at > :now))
+  FROM place p WHERE p.id = :place));
+INSERT INTO hold (...) VALUES (...); INSERT INTO decision (...) VALUES (...); INSERT INTO audit (...) VALUES (...);
 DELETE FROM batch_assert;
 ```
 
-### 7.5.3 Spot-hold race: what happens
+**Hold TTL.** A hold lasts `tenant.hold_ttl`. A hold made under a place offer expires at `min(now + hold_ttl, offer.expires_at + 5m)`, so a member who accepts at the last minute still has time to pay.
 
-Riders A and B both tap **Bike 12** for Tuesday 06:00 Spin at 12:00:00.200, the moment the window opens.
+### 7.5.3 Mat-hold race
 
-1. Both requests reach edge functions and pass checks 1–8 independently, using read-only queries.
-2. Both are sent to the SessionGate for `ses_…tue0600`. The gate orders them: A first (it arrived 3 ms earlier), then B.
-3. A's batch inserts the `place_claim`. The assert passes, and A gets `201 { hold_id, expires_at: 12:05:00.2, quote }`.
-4. B's batch: the upsert's `WHERE` is false (A's hold is live), so no row changes. The assert selects `holder_id = A ≠ B`, so `ok = 0`, the CHECK fails, and the batch rolls back. B gets `409 PLACE_TAKEN` with `alternatives`: the free places in B's eligible partitions with the same attributes as Bike 12 (`front_row`), nearest first by grid distance, for example `[Bike 13, Bike 11]`, plus `free_count`.
-5. **Without the gate** (for example during a gate outage), both batches go to the tenant database. SQLite runs write transactions one at a time, so whichever commits second hits the same assert and fails. The outcome is identical.
-6. A abandons checkout. At 12:05:00.2 the gate's alarm runs `DELETE FROM place_claim WHERE session_id=? AND place_id=? AND kind='hold' AND holder_id=:A AND expires_at <= :now`, sets the hold to `expired`, and emits `place.released`. Promotion runs if anyone is waiting. If the alarm is lost, nothing is stuck: the next claimant's upsert overwrites the expired row (step 1 of §7.5.2).
-7. A comes back at 12:06 and confirms. The confirm batch's guard (`kind='hold' AND holder_id=:A AND expires_at > :now`) fails. The engine tries **one** transparent re-hold of the same place. If the place is free, the confirm goes ahead. If not, A gets `409 HOLD_EXPIRED` with alternatives. Any payment authorisation for A is voided through the gateway, by an outbox job keyed by the hold ID.
+Two members tap **Mat 12** in Park Slope Studio 1 for Tue 07:00 Vinyasa within the same 50 ms. Mat 12 is in row 2 and is a wall mat, so it is in the `general` partition.
 
-Clock assumption: edge nodes' clocks are within ±1 s (NTP). Holds last minutes, so this skew cannot cause a double claim. The database constraint does not depend on clocks, only on which batch commits first.
+1. Both requests pass checks 1–8 at the edge.
+2. The SessionGate orders them: A first (arrived 3 ms earlier), then B.
+3. A's batch inserts the place claim and the asserts pass. A gets `201 { hold_id, expires_at: now+5m, quote }`.
+4. B's batch: the upsert's `WHERE` is false, so no row changes. Assert 2 evaluates to false, the CHECK fails, and the whole batch rolls back. B gets `409 PLACE_TAKEN` with alternatives: free places in B's eligible partitions with Mat 12's attributes (`by_wall: true`, `front_row: false`), nearest first by grid distance, for example `[Mat 18, Mat 24]`, plus `free_count`.
+5. **Gate down:** SQLite runs write batches one at a time, so the second batch fails the same assert. Same outcome.
+6. **A abandons:** at expiry the gate alarm deletes A's place claim (guarded on holder and expiry), marks the hold `expired`, and emits `place.released`. That release goes through the waitlist rules in §7.7. If the alarm is lost, the next claimant's upsert overwrites the expired row, and the one-minute sweep (§12.4) cleans up.
+7. **Expiry during payment:** A confirms after expiry, so the guard fails. The engine tries **one** transparent re-hold of the same mat. If that also fails, A gets `409 HOLD_EXPIRED` with alternatives, and the payment authorisation is voided through an outbox job keyed by the hold ID.
+
+Edge clocks are assumed to be within ±1 s (A-12). Holds last minutes, and the uniqueness guarantee depends only on commit order, not on clocks.
 
 ### 7.5.4 Confirm batch
 
 One batch, in this order:
 
-1. Convert the place claim, guarded on the live hold.
+1. Convert the claim: `UPDATE place_claim SET kind='booking', holder_id=:b, expires_at=NULL WHERE session_id=? AND place_id=? AND kind='hold' AND holder_id=:h AND expires_at > :now`, then the assert `INSERT INTO batch_assert(ok) VALUES ((SELECT count(*) FROM place_claim WHERE session_id=? AND place_id=? AND holder_id=:b) = 1)`.
 2. Insert the booking with its terms snapshot.
-3. Units: `UPDATE entitlement_balance SET balance = balance - :n WHERE …`. `CHECK (balance >= 0)` aborts the batch if units are short. Then insert a `reserve` ledger row.
-4. Upsert every limit counter, with its `CHECK (count <= max)`.
-5. Increment `session.booked_count`.
-6. Write the outbox rows: `booking.confirmed` and the payment capture, if any.
-7. Write the audit row.
+3. Units: `UPDATE entitlement_balance SET balance = balance - :n, last_batch = :batch WHERE …`. If the balance is short, the CHECK aborts the batch. Then assert `last_batch = :batch`, and insert the `reserve` ledger row.
+4. Upsert the limit counters (CHECK `count <= max`).
+5. Update `booked_count`.
+6. Write the outbox rows (`booking.confirmed`, payment capture) and the audit row.
 
-For price payments, the client first completes the processor's hosted payment step, which produces an authorisation. The platform never sees card data. The engine verifies the authorisation amount through the gateway before sending the batch. Capture is an outbox job that runs after commit. If capture fails permanently, the booking is cancelled, the place is released, and the customer is notified.
+**Price payments.** The client completes the processor's hosted payment step, which produces an authorisation. Kairos never sees card data. The engine checks the authorised amount through the gateway before the batch runs. Capture is an outbox job that runs after commit. If capture fails for good, the booking is cancelled as a studio cancel, the place is released, and the member is notified.
 
 ## 7.6 Cancellation, late cancellation, no-show
 
-On `POST /bookings/{id}/cancel` by the customer, an agent for the customer, or staff:
-
-| Case | Condition | Effect in one batch | Deferred |
+| Case | Condition | Effect (one batch) | Deferred |
 |---|---|---|---|
-| Timely | `now < terms.free_until` | `state = cancelled`; delete the place claim; `release` ledger row and balance restored; limit counters decremented; refund outbox if price-paid; `place.released` | — |
-| Late | `free_until ≤ now < start` | `state = late_cancelled`; delete the place claim (the place becomes free for others); limit counters decremented; `place.released` | Penalty per `terms.late_penalty.assess_at` |
-| After start | `now ≥ start` | Rejected for customers (`TOO_LATE_TO_CANCEL`). Staff may cancel with an explicit `penalty: apply | waive` | — |
-| Staff waive | staff with `waive=true` | Treated as timely; audited with a reason | — |
+| Timely | `now < terms.free_cancel_until` | `cancelled`; place claim deleted; `release` ledger row; counters −1; refund per `terms.refund.timely` (`full` → outbox refund; `credit` → grant a 1-credit pack; `none` → nothing); place released (§7.7) | — |
+| Late | `free_cancel_until ≤ now < start` | `late_cancelled`; place claim deleted; counters −1; place released (§7.7) | Penalty at `terms.late_penalty.assess_at` |
+| After start | `now ≥ start` | Members get `TOO_LATE_TO_CANCEL`. Staff may cancel with `penalty: apply \| waive` | — |
+| Studio cancel | Session cancelled (unstaffed, closure, minimum attendance, staff) | Every booking → `cancelled`; `release`; full refund; late fees already charged for this session reversed | — |
 
-**Penalty assessment** (immediately, or by a timer at `session_start` / `session_end`):
+**Penalty assessment**, which runs immediately or from a timer at session start or end:
 
-1. Evaluate `waive_if` with the booking as it is at assessment time. `booking.place_refilled` is true when that booking's place is held by another confirmed booking at that moment.
-2. If waived, `release` the reserved units (the customer gets the credit back) and charge no fee.
-3. If not waived: if `forfeit_units`, write a `forfeit` ledger row (the reserve becomes final). If `fee` and `fee_if`, write an outbox job that charges the fee through the gateway, with idempotency key `fee:{booking_id}:{late|no_show}`. Add `strikes`.
-4. Emit `booking.penalty_assessed` with the outcome.
+1. Evaluate `waive_if` against the booking at that moment. `booking.place_refilled` is true when that booking's place is held by another **confirmed** booking at that moment.
+2. If waived: write a `release` row (credit back) and charge no fee.
+3. If not waived:
+   - when `forfeit_units`, write a `forfeit` row;
+   - when there is a `fee` and `fee_if` is true, create an outbox fee job keyed `fee:{booking}:{late|no_show}`;
+   - add the policy's `strikes`.
+4. Emit `booking.penalty_assessed`.
 
-**No-show:** a timer at `start + grace` marks confirmed bookings that have not checked in as `no_show`, and emits `booking.no_show`. The penalty is assessed at `assess_at`. Staff can reverse a no-show within 24 h (`POST /bookings/{id}/attendance`), which reverses the penalty with compensating ledger rows and a refund job.
+**No-show.** At `start + grace`, a timer marks every confirmed booking that hasn't checked in as `no_show`. The penalty follows at `assess_at`. Staff can correct a no-show within 24 h, which writes compensating ledger rows and a refund job. At `end + 15m`, checked-in bookings become `attended` and their reserved units are consumed.
 
 ## 7.7 Waitlist
 
-**Join** (`POST /sessions/{id}/waitlist`) is allowed when: the waitlist is enabled; the session has no free place the customer is eligible for (I-22); the size is below `max_size`; the mode now is not `closed`; checks 3–8 pass for this customer, with check 8 only testing that payment is *possible* when `require_entitlement` is set, without reserving. `position = max(position) + 1`, assigned inside the SessionGate batch. The customer may give `preferred_place_ids`.
+**Join.** A member can join when:
+- the waitlist is enabled;
+- there is no free place they are eligible for (I-22);
+- the waitlist has fewer than `max_size` entries;
+- the current mode is not `closed`;
+- checks 3–8 pass. If `require_entitlement` is set, payment only has to be possible (nothing is reserved).
 
-**Promotion** runs whenever `place.released` fires for the session: from a cancellation, a hold expiry, a partition release, a capacity increase, or a staff removal. The SessionGate runs it:
+`position = max + 1`, assigned in the gate batch. The body may carry `preferred_place_ids`, `auto_charge_consent` and `payment_method_ref`.
+
+**Priority over new bookings (D-27).** Any batch that frees a place (cancellation, hold expiry, partition release, capacity increase, re-seat) checks whether the session has `waiting` entries and the mode is not `closed`. If so, the same batch sets `place.reserved_for = 'waitlist'`. The hold SQL (§7.5.2, assert 3) then refuses that place to anyone who doesn't hold an active place offer. This is enforced in the database, so it holds even when the gate is down.
+
+**Promotion.** The gate runs promotion as its very next command after any batch that sets `reserved_for`.
 
 ```
-mode ← waitlist mode at now (first schedule entry whose `until` is still in the future; else closed)
-if mode == auto_promote:
-   for entry in waiting entries by position:
-      place ← preferred free eligible place, else best eligible free place (place_choice)
-      if place is null: continue        // e.g. the freed place is tier-reserved and this customer isn't eligible
-      result ← evaluate pipeline steps 3–10 for entry.customer with that place, channel 'waitlist'
-               (step 4 skipped: promotion is allowed after the window closes, until the schedule ends)
-      if result.allowed: one batch = confirm booking (units reserved / price via saved method*) +
-                           entry.state=promoted; emit booking.confirmed{via: waitlist}; stop
-      else: entry.state = skipped, reason recorded; emit waitlist.skipped; continue
-if mode == offer_all:
-   all waiting entries → state=offered, offer_expires_at = now + offer_ttl; emit waitlist.offered
-   the first offered customer to hold + confirm wins (normal flow, limited to offered customers)
-   expired offers return to waiting if the session is still full
-if mode == closed: nothing; at session start all entries → expired; emit waitlist.expired
+mode ← first schedule entry whose `until` instant is still in the future; else closed
+auto_promote:
+  for entry in waiting entries by position:
+    place ← entry's first free preferred place among reserved/free eligible places, else best eligible
+    if none: continue
+    result ← pipeline steps 3, 5–10 for entry.customer with that place, channel 'waitlist' (step 4 skipped)
+    payment: units → reserve; price → only if auto_charge_consent && payment_method_ref
+             (charge via gateway with idempotency key = entry id); otherwise treat as not allowed → offer instead
+    allowed → one batch: booking confirmed (booked_via=waitlist), place.reserved_for=NULL, entry → promoted,
+              emit booking.confirmed; stop
+    not allowed → entry → skipped (reason recorded), emit waitlist.skipped{reason}; continue
+  if nobody promoted: clear reserved_for (place becomes free for anyone)
+offer_all:
+  every waiting entry → offered; create a place Offer per entry (expires_at = now + offer_ttl); emit waitlist.offered
+  place stays reserved for offered members; the first offered member to hold + confirm wins (normal flow, assert 3)
+  when all offers expire or are declined: entries → waiting (if session still full), reserved_for cleared
+closed: reserved_for not set; at session start all entries → expired; emit waitlist.expired
 ```
 
-\* Price-paid promotion needs a saved payment method with the processor (via the gateway) and the customer's prior consent, captured at join (`auto_charge_consent: true`). Without it, the entry gets an offer instead, even in `auto_promote` mode.
+Promotion never creates a hold. An auto-promoted member is booked directly, and a member with an offer goes through the normal hold flow. **Notifications** for promotion, offers and skips are sent by workflows (§4b.1 `promoted_notice`, `offer_notice`, `skipped_notice`) through the notification service.
 
 ## 7.8 Approval
 
-When check 11 says approval is required, the booking is created as `pending_approval` and the place is claimed (the place is not oversold). Units are reserved. A timer at `now + timeout` applies `on_timeout`. Approvers with the listed roles see the booking in their queue (`GET /approvals`). Rejection releases everything as a timely cancellation and emits `booking.rejected`.
+A booking that needs approval is created as `pending_approval`. The place is claimed and units are reserved. A timer applies `on_timeout`. Approvers use `GET /approvals` and `POST /approvals/{id}/decide`. A rejection releases everything, as for a timely cancellation.
 
 ## 7.9 Reason codes
 
-| Code | Meaning | Customer-facing message (default) |
+| Code | Meaning | Default member message |
 |---|---|---|
-| `FORBIDDEN` | Actor may not act for this customer | — |
-| `DOMAIN_NOT_OWNED` | Write to a mirrored domain whose outside system rejected it | "We couldn't complete that right now." |
-| `SESSION_NOT_BOOKABLE` | Cancelled, completed, started or draft | "This class isn't open for booking." |
-| `WINDOW_NOT_OPEN` | Before `opens` | "Booking opens {opens_at}." |
-| `WINDOW_CLOSED` | After `closes` | "Booking has closed." |
-| `NOT_ELIGIBLE` | Eligibility expression false | `ineligible_message` |
-| `EXPR_ERROR` | Expression failed (fail-safe) | "We couldn't confirm eligibility. Please contact us." |
+| `FORBIDDEN` | Actor may not act for this member | — |
+| `ACCOUNT_SUSPENDED` | Member is suspended | "Your account is paused. Please contact the studio." |
+| `WRITE_FROZEN` | Domain is mid-cutover (§18.7) | "Booking is paused for a few minutes. Please try again." |
+| `OUTSIDE_UNAVAILABLE` | Mirror-mode outside system is unreachable (§7.12) | "We can't take bookings right now. Please try again shortly." |
+| `DOMAIN_NOT_OWNED` | Outside system rejected the write, with no mapped reason | "We couldn't complete that." |
+| `SESSION_NOT_BOOKABLE` | Session is cancelled, completed or started | "This class isn't open for booking." |
+| `WINDOW_NOT_OPEN` / `WINDOW_CLOSED` | Outside the booking window | "Booking opens {opens_at}." / "Booking has closed." |
+| `NOT_ELIGIBLE` / `EXPR_ERROR` | Eligibility | `ineligible_message` |
 | `ALREADY_BOOKED` / `CUSTOMER_OVERLAP` | Duplicate or overlapping booking | "You're already booked at this time." |
-| `LIMIT_REACHED` | A booking limit is full | limit `message` |
-| `NO_ENTITLEMENT` / `INSUFFICIENT_UNITS` / `ENTITLEMENT_CAP_REACHED` / `PAYMENT_REQUIRED` | Payment checks | "Your plan doesn't cover this class." etc. |
-| `PLACE_TAKEN` / `PLACE_NOT_ELIGIBLE` / `SESSION_FULL` | Place checks | "That bike was just taken. Bike 13 is free." |
-| `INTAKE_REQUIRED` | Missing required fields | "Please complete: …" |
+| `LIMIT_REACHED` | A booking limit is full | Limit `message` |
+| `NO_ENTITLEMENT` / `INSUFFICIENT_UNITS` / `ENTITLEMENT_CAP_REACHED` / `PAYMENT_REQUIRED` | Payment checks | "Your plan doesn't cover this class." |
+| `PLACE_TAKEN` / `PLACE_NOT_ELIGIBLE` / `SESSION_FULL` | Place checks | "That mat was just taken. Mat 18 is free." |
+| `INTAKE_REQUIRED` | Intake fields missing | "Please complete: …" |
 | `HOLD_EXPIRED` | Hold timed out | "Your hold expired." |
-| `TOO_LATE_TO_CANCEL` | After start | — |
-| `RESOURCE_CONFLICT` | Occupancy collision (assignment or shift) | "{person} is already booked {when}." |
-| `OUTSIDE_AVAILABILITY` | Outside availability or time off | — |
-| `SKILL_MISSING` / `ROLE_MISSING` | Selector mismatch | — |
-| `REST_VIOLATION` / `MAX_HOURS` / `MAX_ASSIGNMENTS` / `TRANSFER_TIME` / `ALLOWED_HOURS` / `CONSECUTIVE_DAYS` | Person rules (§8.6) | — |
-| `STALE_VERSION` | An optimistic concurrency guard failed after retries | "Please try again." |
+| `TOO_LATE_TO_CANCEL` | Class has started | — |
+| `CONFIRMATION_STALE` | Agent confirmation no longer matches (§11.6) | "Details changed. Please review again." |
+| `RESOURCE_CONFLICT` | Occupancy collision | "{person} is already booked {when}." |
+| `OUTSIDE_AVAILABILITY` / `SKILL_MISSING` / `ROLE_MISSING` | Person rules | — |
+| `REST_VIOLATION` / `MAX_HOURS` / `MAX_ASSIGNMENTS` / `TRANSFER_TIME` / `CONSECUTIVE_DAYS` | Person rules | — |
+| `MIRROR_STALE` | Mirror data too old for a staff write (§18.6) | — |
+| `STALE_VERSION` | Optimistic guard still failing after retries | "Please try again." |
 
 ## 7.10 Time zones and DST
 
-- **Storage:** every instant is UTC milliseconds. Every location, site and person has an IANA zone. The tzdb version is pinned per release and recorded in `CompiledConfig.tzdb`.
-- **Recurrence:** RRULEs expand in the location's zone with `DTSTART;TZID=<zone>`. Occurrences keep their **local wall time** across DST changes.
-- **Times that don't exist** (spring forward, for example 02:30 on 14 Mar 2027 in `America/New_York`): the time is read with the UTC offset in force before the gap, as RFC 5545 specifies, so the occurrence starts at 03:30 EDT. The validator reports `DST_SHIFTED_OCCURRENCE` (info) for each one in the horizon.
-- **Times that occur twice** (fall back, 01:30 on 7 Nov 2027): the first occurrence (daylight time) is used, as RFC 5545 specifies.
-- **Durations are elapsed time.** A 01:00–02:00 class on fall-back night lasts 60 minutes. An overnight shift starting 22:00 with `duration: 8h` ends at 05:00 local on fall-back night and 07:00 on spring-forward night. Hours worked (I-28) are always elapsed.
-- **Offsets with `d`/`w` are calendar arithmetic:** "7 days before at 12:00" is `local_date(start) − 7 days` at 12:00 local, then converted to UTC. It is *not* 168 hours.
-- **Day windows** (limits, `max_hours/day`, caps) use the local day of the session's location. Person rules that span locations in different zones use the person's home zone.
-- **Weekly availability** is wall-clock and converted per date, so "09:00–17:00" means 8 elapsed hours on normal days and also on DST days, because the change happens at night.
-- **tzdb changes:** when a new tzdb release changes the rules for future dates, a rebase job recomputes UTC instants for materialised future sessions, keeping their local wall time. Any resulting occupancy collisions are reported as drift items and to managers.
+- Instants are stored in UTC. Every studio and every person has an IANA zone. The tzdb version is pinned per release.
+- RRULEs expand in the studio's zone and keep **local wall time** across DST.
+- **Non-existent local times** (spring forward): the occurrence moves forward by the gap, per RFC 5545. A 02:30 class on 14 Mar 2027 in New York runs at 03:30 EDT. Validation reports `DST_SHIFTED_OCCURRENCE`.
+- **Ambiguous local times** (fall back): the first occurrence is used. A 01:30 class on 7 Nov 2027 runs at 01:30 EDT (05:30 UTC), not at 01:30 EST.
+- **Durations are elapsed time.** A 75-minute class that starts at 01:00 on fall-back night lasts 75 minutes and ends at 01:15 EST. A desk shift that crosses the change records its elapsed minutes (I-28). Yoga studios close overnight, so no rostered template in §4b crosses 02:00, and validation warns if one does.
+- **`d`/`w` offsets are calendar arithmetic.** "14 days before at 12:00" means `local_date(start) − 14 days` at 12:00 local time.
+- **Day windows** for limits, caps and person rules use the session's studio zone. Person rules that span studios in different zones use the person's home zone.
+- **Members in other zones.** The API always returns `local` in the **studio's** zone, plus the UTC instant. Front ends may also show the viewer's local time, labelled "your time". Booking windows and cancel deadlines are always computed in the studio's zone.
+- **tzdb changes.** A rebase job recomputes future UTC instants, keeping local wall time, and reports any collisions.
 
-The DST test matrix is listed in §14.1.
+## 7.11 Performance targets (p95, single tenant)
 
-## 7.11 Performance targets (p95, production, single tenant)
+| Operation | Target |
+|---|---|
+| Timetable week, anonymous | 60 ms cached / 200 ms uncached |
+| Timetable week, personalised | 250 ms |
+| Mat map | 120 ms |
+| Hold | 250 ms |
+| Confirm (units / price) | 300 ms / 800 ms |
+| Booking-open rush | 300 hold attempts/s on one class with no double claims; first-come ordering within ±50 ms |
 
-| Operation | Target | Notes |
-|---|---|---|
-| Timetable week (one location, anonymous) | 60 ms from edge cache / 200 ms uncached | |
-| Timetable week personalised | 250 ms | eligibility, limits and payment per session |
-| Spot map | 120 ms | |
-| Hold | 250 ms | including SessionGate |
-| Confirm (units) | 300 ms | |
-| Confirm (price) | 800 ms | including the gateway check of the processor authorisation |
-| On-demand search, 14 days | 400 ms | |
-| Booking-open rush | 300 hold attempts/s per session with no double claims; fairness by arrival order within ±50 ms | |
+They are measured by synthetic probes every minute from three regions, per tenant, and by a load test before each phase gate (§14.3).
 
-## 7.12 Mirror and shadow behaviour
+## 7.12 Mirror and shadow modes, and outside outages
 
-While the `bookings` domain (or `members`, for entitlement debits) is not `owner`, the engine works as a **façade with checks**:
+While `bookings` (or `members`, for debits) is not `owner`:
 
-1. **Pre-checks run locally:** check 1, the cross-domain occupancy check for staff-side writes, and a soft capacity check against the mirror. These protect the outside system from obviously invalid writes.
-2. **Write-through:** the engine calls the outside system through the gateway (`POST gateway/{system}/bookings`, with idempotency key = hold or booking ID). The outside system's answer is **authoritative**. On success, the mirror row is written with `source = mirror` and an `ExternalRef`. On rejection, the outside reason is mapped to a Kairos reason code (or `DOMAIN_NOT_OWNED` if there is no mapping) and returned.
-3. **Shadow mode** adds one more step: the engine runs its full pipeline (§7.4) against local data *before* the write-through. It stores its decision, and compares it with the outside outcome. A difference creates a `ShadowDisagreement`. The customer always gets the outside outcome.
-4. **Spot holds in mirror mode:** if the outside system supports reservations, the hold goes through to it. If not, Kairos keeps a local advisory hold (the same `place_claim` mechanism on mirrored places) so that two Kairos-routed customers don't race each other. Customers booking directly in the outside system are only seen when its events arrive. So a confirm can still fail with the outside system's "taken" result, which maps to `PLACE_TAKEN`.
+1. **Local pre-checks:** actor, member state, write freeze, mirrored capacity.
+2. **Write-through:** the engine calls the outside system through the gateway with idempotency key = hold or booking ID. The outside system's answer is final. A success writes the mirror row (`source = mirror`). A rejection is mapped to a Kairos reason code, or to `DOMAIN_NOT_OWNED` if it has no mapping.
+3. **Shadow mode** also runs the full pipeline first and logs a `ShadowDisagreement` if the outcomes differ.
+4. **Mat holds in mirror mode:** if the outside system supports reservations, they are used. Otherwise Kairos keeps an advisory local hold (Q-01).
+5. **Outside outage:**
+   - Write-through calls time out after 5 s. After 3 consecutive failures, a circuit opens for 30 s.
+   - Writes in that domain are refused with `OUTSIDE_UNAVAILABLE`. They are never queued, because the outside system is the record.
+   - Reads are served from the mirror, with a `stale_since` field that front ends show as a banner.
+   - Desk check-ins are the only writes that queue: they wait in the desktop app's offline queue, keyed by `client_key`, and replay when the connection returns.
+   - Owned domains are unaffected, except that outbound pushes queue in the outbox for up to 24 h before raising `push_failed` drift.

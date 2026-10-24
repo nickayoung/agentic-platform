@@ -1,0 +1,85 @@
+# Generated from docs/spec/04b-example-configs.md — keep in sync (CI diff check, §14.2).
+schema_version: "2.0"
+tenant:
+  name: "Starter Yoga"
+  default_timezone: America/New_York
+  currency: USD
+  locale: en-US
+  week_starts: mon
+  hold_ttl: 5m
+  materialize_horizon: 6w
+  customer_label: member
+  fee_ceiling: { minor: 5000, currency: USD }
+  closure_pay_notice: 2h
+  closing_notice: 14d
+  environment_guards: { preview_outbound: record_only }
+locations:
+  - { key: main, name: "Main studio", timezone: America/New_York }
+units: [{ key: class_credit, name: "Class credit" }]
+skills: [{ key: ryt200, name: "RYT-200", expires: false }]
+roles: [{ key: teacher, name: "Yoga teacher", implies_skills: [ryt200] }]
+tiers: [{ key: member, name: Member, rank: 1 }]
+resource_types:
+  - { key: staff, name: Staff, kind: person, attributes: [] }
+  - { key: studio_room, name: "Studio room", kind: space, attributes: [{ key: capacity, type: int, required: true }] }
+resources:
+  - { key: room_1, type: studio_room, name: "Studio", location: main, attributes: { capacity: 20 } }
+layouts: []
+templates:
+  - key: hatha_60
+    name: "Hatha 60"
+    kind: class
+    tags: [class]
+    duration: 60m
+    scheduling: { mode: timetable }
+    participants: { who: customers, capacity: { mode: pooled_from_space, requirement: room } }
+    requirements:
+      - { key: room, select: { type: studio_room }, assign: fixed, buffers: { after: 15m } }
+      - { key: teacher, select: { role: teacher }, assign: fixed, buffers: { before: 10m, after: 10m } }
+    cost: { payment: units_or_price, units: [{ unit: class_credit, amount: 1 }], price: { minor: 2500, currency: USD } }
+    policy: simple
+timetable:
+  - { key: weekday_0730, template: hatha_60, location: main, rrule: "FREQ=WEEKLY;BYDAY=MO,WE,FR",
+      start_local: "07:30", valid_from: "2027-01-04", fixed: { room: room_1, teacher: "@staff:owner" } }
+policies:
+  - key: simple
+    name: "Simple terms"
+    booking_window: { opens: { before_start: 7d }, closes: { before_start: 0m } }
+    cancellation:
+      customer_can_cancel: true
+      free_until: { before_start: 6h }
+      late: { forfeit_units: true, assess_at: immediately }
+      no_show: { forfeit_units: true, assess_at: session_end, grace: 10m }
+    refund: { timely: credit, studio_cancel: full }
+    limits: []
+    unstaffed: { check_at: { before_start: 1h }, action: notify_staff }
+    customer_overlap: forbid
+    retroactive: lenient_only
+entitlement_products:
+  - { key: pack_5, name: "5 classes", kind: pack, tier: member, grants: [{ unit: class_credit, amount: 5 }],
+      validity: { length: 12w, anchor: purchase, recurring: false }, priority: 1, sold_by: platform,
+      price: { minor: 11000, currency: USD } }
+availability: []
+constraints: []
+coverage: []
+workflows:
+  - key: cancelled_notice
+    name: "Class cancelled"
+    trigger: { event: session.cancelled }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { session_customers: true }, message: class_cancelled }]
+custom_fields:
+  - { key: liability_waiver, label: "Liability waiver", entity: customer, type: consent, required_if: "true",
+      visible_to: [desk, manager, member], editable_by: [member, desk], pii: false }
+forms: []
+views: []
+simulation: []
+access:
+  issuers:
+    - { key: member_auth, audience: member, issuer: "https://id.example.com/members",
+        jwks_url: "https://id.example.com/members/.well-known/jwks.json", subject_claim: sub, tenant_claim: tid }
+    - { key: staff_auth, audience: staff, issuer: "https://id.example.com/staff",
+        jwks_url: "https://id.example.com/staff/.well-known/jwks.json", subject_claim: sub, tenant_claim: tid }
+  role_mappings:
+    - { issuer: staff_auth, claim: groups, equals: owners, grant: owner }
+  default_member_role: member

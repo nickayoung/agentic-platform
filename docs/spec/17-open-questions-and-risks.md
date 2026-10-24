@@ -1,31 +1,32 @@
 # 17. Open questions and risks
 
-## 17.1 Open questions
+## 17.1 Open questions (for the product owner or the tenant)
 
-| ID | Question | Owner | Needed by |
+| ID | Question | Recommended answer | Needed by |
 |---|---|---|---|
-| Q-01 | Does BookingVendor support reserving a spot during checkout? If not, mirror-mode spot holds are advisory, and some confirms will fail with the outside system's "taken" result (§7.12) | Integration lead | Phase 2 |
-| Q-02 | Should instructors who also work the desk have a cross-role cap that differs from `desk_week` (for example a total of 45 h including teaching)? This affects labour-law interpretation in New York | Tenant ops + legal | Phase 1 |
-| Q-03 | Some tenants may want overnight shifts to end at a fixed **wall-clock** time across DST changes. Add `duration_basis: wall_clock` to templates? | Product | Phase 6 |
-| Q-04 | Per-place surcharges (for example a premium front-row price) are not expressible in schema 1.0. Add `price_rules` with `place.attributes` in context? | Product | Phase 4 |
-| Q-05 | Should a late-cancel fee be waived when the **session** ended up with no unfilled places at start, even if the specific place wasn't refilled (pooled fairness)? | Tenant owner | Phase 2 |
-| Q-06 | Mirror staleness guard: block or warn by default when BookingVendor is unreachable during roster publish? Currently it blocks, with a manager override (§18.6) | Tenant ops | Phase 1 |
-| Q-07 | Which roles may approve substitute proposals: only managers, or also lead instructors (a tenant-defined role)? Platform roles are a fixed set today | Product | Phase 3 |
-| Q-08 | Data residency: are all tenants in one region? Do edge database locations need pinning? | Security | Phase 6 |
-| Q-09 | Guest bookings (`allow_guests`) and family accounts: one booking per person with `group_id`, or a party-size booking? | Product | Phase 4 |
-| Q-10 | Should configuration agent conversations be kept longer than 30 days to support audits of why config changed? (Summaries and facts are kept with the version permanently) | Security + product | Phase 2 |
+| Q-01 | Does BookingVendor support reserving a mat during checkout? | If not, mirror-mode holds are advisory and the "taken" result comes from BookingVendor (§7.12) | Phase 2 |
+| Q-02 | When a studio closes at short notice, are desk staff paid for the shift? | Pay if the closure is posted less than 2 h before the shift (`closure_pay_notice`) | Phase 1 |
+| Q-03 | Should instructors who also work the desk have a total weekly cap above the desk cap (New York labour rules)? | Keep 40 h combined until legal confirms | Phase 1 |
+| Q-04 | Are workshops (multi-session series sold as one product) and per-mat surcharges needed? | Out of v2.0; consider for schema 2.1 | Phase 6 |
+| Q-05 | Should a desk shift be vacated automatically when BookingVendor assigns that person a class over it (D-34)? | Not at first. Revisit after 30 days of Phase 1 conflict data | Phase 1 + 30 d |
+| Q-06 | When BookingVendor is unreachable at roster publish: block or warn? | Block, with an audited manager override (§18.6) | Phase 1 |
+| Q-07 | Who may approve substitute proposals: managers only, or also senior teachers? | Managers and desk staff with the `manager` mapping only | Phase 3 |
+| Q-08 | Retention for closed member accounts: 2 years, then erase? | Yes, subject to legal | Phase 2 |
+| Q-09 | Guests booked with a member (`allow_guests`): how many, and paid how? | 1 guest per booking, paid by drop-in price | Phase 4 |
+| Q-10 | Minimum age for online booking, and how it is collected (D-31)? | 18; a date of birth at signup through the member sign-in service | Phase 2 |
+| Q-11 | Real issuer URLs, directory group names and BookingVendor/ShiftTool/PayrollCo API details | Collect at onboarding (the §4b.1 values are placeholders) | Phase 0 |
 
 ## 17.2 Risks
 
-| ID | Risk | Likelihood | Impact | Mitigation |
+| ID | Risk | L | I | Mitigation |
 |---|---|---|---|---|
-| R-01 | **Mirror staleness.** An outside change Kairos hasn't seen yet collides with a new owned desk shift (the outside system assigns a class during an already-published shift) | Medium | Medium | Event ingestion; the targeted pull before staff commits (§18.6); immediate `cross_domain_conflict` alert and task; the conflicted claim still blocks new Kairos claims (I-18) |
-| R-02 | Write throughput of the per-tenant single-writer database during booking-open rushes across many sessions at once | Low (yoga tenant) / Medium (big gyms) | High | SessionGate absorbs bursts. Batches are small. Load tests at 3× the expected peak. Option: shard hot timetable writes per location into a separate database (requires cross-database occupancy, which is deferred) |
-| R-03 | Maturity of the TypeScript CEL implementation | Medium | Medium | The profile is small, there is a conformance suite, and an in-house fallback (A-13) |
-| R-04 | Solver hosting outside the edge adds an operational component for a small team | Medium | Low | Stateless container, IaC, queue with retries. The booking path never depends on it |
-| R-05 | LLM config agent produces plausible but wrong configs | Medium | High | Schema boundary, behavioural scenarios in evals, simulation deltas, impact plans, human approval, fast rollback |
-| R-06 | Shadow-mode disagreements are dominated by BookingVendor's undocumented rules | High | Medium | Triage categories. Add `config_fix` iterations through the agent. Accept `expected` disagreements explicitly before cutover |
-| R-07 | Occupancy row growth for long claims (multi-day blocks, 18-hour sessions) | Low | Low | `occupancy: none` for containers; blocks longer than 7 days are stored as day-level claims; pruning |
-| R-08 | Agents mis-sell or mis-explain policies | Medium | Medium | Policy text is rendered from config; the H2 faithfulness checker; confirmation cards for consequences |
-| R-09 | Cutover rollback after many owner-mode writes fails due to outside-system limits (rate limits, missing fields) | Medium | High | Continuous `outbound_push` with read-after-write verification; rollback rehearsals in each phase; retire only after 60 days |
-| R-10 | Team capacity: one small team working mostly through coding agents | High | Medium | Strict typed contracts, golden fixtures, scenario DSL, property tests as the safety net for agent-written code; phases scoped to the reference tenant first |
+| R-01 | Mirror staleness: an outside class assignment Kairos hasn't seen yet collides with a new desk shift | M | M | Events plus a targeted pull before staff commits; alert on conflict; the conflicted claim still blocks new claims |
+| R-02 | Unmapped or wrongly mapped teachers in BookingVendor | M | H | Go-live needs 100 % mapped; `unmapped_person` blocks desk assignment and alerts; matching on email first |
+| R-03 | Write throughput during booking-open rushes on one tenant database | L | H | SessionGate; small batches; load tests at 3× peak |
+| R-04 | Maturity of the TypeScript CEL library | M | M | Small profile, conformance tests, in-house fallback |
+| R-05 | The solver container adds operational load | M | L | Stateless worker; the booking path doesn't depend on it |
+| R-06 | The config agent produces plausible but wrong configs | M | H | Scenario evals, simulation, impact plans, human approval, fast rollback |
+| R-07 | Shadow disagreements dominated by undocumented BookingVendor rules | H | M | Triage categories; `config_fix` loop; explicit acceptance before cutover |
+| R-08 | Agents mis-explain policy | M | M | Policy text rendered from config; H2 checker; confirmations |
+| R-09 | Rollback fails after a long time in owner mode | M | H | Continuous push with verification; rehearsals; retire only after 60 days |
+| R-10 | Small team working mostly through coding agents | H | M | Typed contracts, fixtures, scenario DSL, property tests, assert lint |

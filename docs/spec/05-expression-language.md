@@ -1,163 +1,135 @@
 # 5. Expression language
 
-## 5.1 Choice: CEL (Common Expression Language), restricted profile (D-01)
+## 5.1 Choice: CEL, restricted profile (D-01)
 
 | Criterion | CEL | JSONLogic |
 |---|---|---|
-| Static type checking against a declared environment | Yes. The checker rejects unknown fields and type mismatches at publish time | No. Errors surface at runtime |
-| Guaranteed termination, no side effects | Yes. Non-Turing-complete by design | Yes |
-| Cost estimation before execution | Yes. The spec defines a cost model | No |
-| Readable in diffs and by owners | `customer.tier == 'premium' && session.booked_count < 3` | `{"and":[{"==":[{"var":"customer.tier"},"premium"]},{"<":[{"var":"session.booked_count"},3]}]}` |
-| LLM generation accuracy | High: C-like syntax, well represented in training data | Lower: deeply nested JSON, easy to get brackets wrong |
-| Time and duration types | Built-in `timestamp`, `duration` | None; everything is a number or string |
-| TypeScript runtime maturity | Moderate: community implementations | High: tiny and stable |
+| Static type checking at publish time | Yes. Unknown fields and type mismatches are rejected | No. Errors only appear at runtime |
+| Guaranteed termination, no side effects | Yes | Yes |
+| Cost estimation before execution | Yes | No |
+| Readable in approval diffs | `customer.tier == 'unlimited'` | `{"==":[{"var":"customer.tier"},"unlimited"]}` |
+| LLM generation accuracy | High (C-like syntax) | Lower (deeply nested JSON) |
+| Time and duration types | Built in | None |
+| Maturity of TypeScript implementations | Moderate | High |
 
-CEL wins on the two properties that matter most for an agent-written config: **static checking** (an LLM's mistakes are caught when the config is validated, not when a member tries to book) and **readability in the approval diff**. The main risk is the maturity of TypeScript implementations. We mitigate it by keeping the profile small and gating any library on a conformance suite:
+CEL wins on static checking and readability. Both matter for config written by an agent: an LLM's mistake is caught at validation, not when a member tries to book.
 
-- `packages/expr` exposes `compile(source, slot) → CompiledExpr | CompileError[]` and `evaluate(compiled, activation) → Value | EvalError`.
-- It wraps a maintained TypeScript CEL implementation. That implementation MUST pass our profile's subset of the `cel-spec` conformance tests, plus our own tests (§14.1). If no library passes, we build the profile in house (parser, checker and tree-walking evaluator, estimated at ≈3–4k lines), because the profile is deliberately small.
-- Compiled ASTs are stored in `CompiledConfig`. Edge functions never parse CEL in the hot path.
+The TypeScript maturity risk is handled in three ways:
+- `packages/expr` wraps a maintained TypeScript CEL implementation behind `compile(source, slot)` and `evaluate(compiled, activation)`.
+- That implementation must pass this profile's subset of the cel-spec conformance tests.
+- If no library passes, the profile is small enough to build in house: about 3–4k lines (A-13).
 
-## 5.2 Profile: what is allowed
+## 5.2 Profile
 
-**Allowed:** literals (int, double, string, bool, null, list, map); field selection; indexing; `== != < <= > >= && || ! ?:`; arithmetic `+ - * / %` on numbers; `+` on timestamps and durations; `in`; the macros `has`, `all`, `exists`, `exists_one`, `filter`, `map` over lists in the activation; the functions listed in §5.4.
+**Allowed:**
+- literals, field selection and indexing;
+- comparison, logical, arithmetic and `?:` operators;
+- `in`;
+- the macros `has`, `all`, `exists`, `exists_one`, `filter`, `map` (lists from the activation only);
+- the functions in §5.4.
 
-**Not allowed:** user-defined functions; protobuf messages and type construction; `bytes`; regular expressions other than `matches` with a literal RE2 pattern of ≤ 128 characters; any extension not listed in §5.4. Nothing can do I/O, read the clock or produce randomness. `now` is a variable bound by the engine.
+**Forbidden:**
+- user-defined functions, protobuf types and `bytes`;
+- regex, except `matches` with a literal RE2 pattern of 128 characters or fewer;
+- any I/O, clock access or randomness. `now` is bound by the engine.
 
-## 5.3 Slots and their environments
-
-Every config field of type `Expr` belongs to a **slot**. The slot fixes the declared variables and the required result type. The checker rejects an expression that refers to a variable not in its slot.
+## 5.3 Slots and environments
 
 | Slot | Used by | Result | Variables |
 |---|---|---|---|
-| `booking` | `template.eligible_if`, `policy.eligible_if`, `price_rules[].when`, `partitions[].eligible_if`, `limits[].count_if/applies_if`, `Penalty.fee_if/waive_if`, `approval.required_if`, `cost.units[].amount`, `intake.when`, `custom_fields[].required_if`, `entitlement_products[].covers`, `caps[].count_if` | `bool` (`double` for `units.amount`) | `now, customer, booking, session, template, location, request` |
-| `candidate` | `ResourceSelector.where`, `rank.expr`, `ConstraintDef.applies_to.people_where`, `assignment_expr.must` | `bool` (`double` for `rank.expr`) | `now, candidate, session, template, booking?` (booking is present only at booking time) |
-| `event` | `workflow.trigger.where`, `workflow.condition`, `action.when`, action input values | `bool` / value | `now, event` + the subjects the event carries: `session, booking, customer, assignment, place, roster` |
+| `booking` | `eligible_if` (template, policy), `price_rules[].when`, `partitions[].eligible_if`, `limits[].count_if`/`applies_if`, `Penalty.fee_if`/`waive_if`, `approval.required_if`, `intake.when`, `custom_fields[].required_if`, `covers`, `caps[].count_if` | `bool` | `now, customer, booking, session, template, location, request` |
+| `candidate` | `select.where`, `applies_to.people_where`, `assignment_expr.must` | `bool` | `now, candidate, session, template` |
+| `event` | `trigger.where`, `condition`, `action.when`, action `input`/`vars` values | `bool` / value | `now, event`, plus the event's subjects: `session, booking, customer, assignment, place, roster` |
 | `row` | `views[].filter` | `bool` | `now, me, row` |
 
 ### Declared types
 
 ```text
-customer:
-  id: string; tier: string|null; strikes: int; tags: list<string>
-  custom: map<string, dyn>            // custom fields of entity=customer
-  history:
-    total:     Counts
-    tags:      map<string, Counts>    // keyed by template tag
-    templates: map<string, Counts>    // keyed by template key
 Counts: { completed: int, upcoming: int, cancelled: int, late_cancelled: int, no_show: int,
           last_completed_at: timestamp|null }
-
-session:
-  id; template_key; location_key: string|null; start: timestamp; end: timestamp; zone: string
-  local_date: string ("2026-11-03"); local_start: string ("18:30"); weekday: string ("tue")
-  booked_count: int; capacity_total: int; waitlist_count: int; status: string; tags: list<string>
-  template: Template                  // shorthand for the session's template
-template / Template: { key: string; kind: string; tags: list<string> }
+customer: { id: string; tier: string|null; strikes: int; state: string; home_location_key: string|null;
+            custom: map<string, dyn>;
+            history: { total: Counts; tags: map<string, Counts>; templates: map<string, Counts> } }
+Template: { key: string; kind: string; tags: list<string> }
+session:  { id; template_key; template: Template; location_key: string; start: timestamp; end: timestamp;
+            zone: string; local_date: string; local_start: string; weekday: string;
+            booked_count: int; capacity_total: int; waitlist_count: int; status: string; tags: list<string> }
+template: Template
 location: { key: string; timezone: string }
-
-booking:
-  id: string|null (null while proposed); state: string; start: timestamp; end: timestamp
-  duration_minutes: int; channel: string; template: Template
-  payment: { method: 'units'|'price'|'none' }
-  entitlement: { product_key: string; kind: string; tier: string|null } | null
-  place: { label: string; partition: string; attributes: map<string, dyn> } | null
-  place_refilled: bool; intake_complete: bool
-  <custom booking fields by key>      // e.g. booking.party_size
-  resource(key: string) -> Resource   // member function: the resource assigned to requirement `key`
-
-request: { channel: 'web'|'desk'|'portal'|'agent'|'mirror'|'waitlist'; actor_type: string }
-
-candidate:
-  resource: Resource
-  requirement_key: string
-  load: { minutes_day: int; minutes_week: int; assignments_day: int; assignments_week: int }
-  history_with_customer: int          // completed sessions with this booking's customer (0 outside booking)
+booking:  { id: string|null; state: string; start: timestamp; end: timestamp; duration_minutes: int;
+            channel: string; template: Template;
+            payment: { method: 'units'|'price'|'none' };
+            entitlement: { product_key: string; kind: string; tier: string|null } | null;
+            place: { label: string; partition: string; attributes: map<string, dyn> } | null;
+            place_refilled: bool; intake_complete: bool;
+            <custom booking fields by key> }
+request:  { channel: 'web'|'desk'|'portal'|'agent'|'mirror'|'waitlist'; actor_type: string }
 Resource: { id; key: string|null; type: string; kind: string; tags: list<string>; roles: list<string>;
             skills: list<string>; attributes: map<string, dyn>; location_keys: list<string> }
-
+candidate: { resource: Resource; requirement_key: string;
+             load: { minutes_day: int; minutes_week: int; assignments_day: int; assignments_week: int } }
 assignment: { id: string; requirement_key: string; resource: Resource|null; state: string; source: string }
-place: { id: string; label: string; partition: string; attributes: map<string, dyn> }
-roster: { published_through: timestamp }  // end of the latest published roster for the trigger's location
+place:  { id: string; label: string; partition: string; attributes: map<string, dyn> }
+roster: { published_through: timestamp }
 event:  { name: string; at: timestamp; actor_type: string; reason: string|null; data: map<string, dyn> }
 me:     { roles: list<string>; resource_id: string|null; customer_id: string|null; location_keys: list<string> }
-row:    the view entity with its computed fields and custom.<key>
+row (entity = session): session fields + { assigned_resource_ids: list<string>; template: Template; custom: map }
+row (other entities): the entity's public fields + custom
 ```
 
-**Map completeness guarantee.** `customer.history.tags` and `customer.history.templates` contain an entry, zero-filled if needed, for **every** tag and template key in the compiled config. So `customer.history.tags['assessment']` never raises a missing-key error. Keys that are not in config (a typo) are caught at compile time: the checker knows the key set and reports `UNKNOWN_HISTORY_KEY`.
+- **Map completeness.** `customer.history.tags` and `customer.history.templates` have a zero-filled entry for every tag and template key in the compiled config. So `customer.history.tags['hot']` never raises a missing-key error. Using a key that isn't in the config is a compile error (`UNKNOWN_HISTORY_KEY`).
+- **Nulls.** `customer.tier` and `booking.entitlement` can be null. Comparing with null is false. Selecting a field of null is an error. The linter warns about unguarded selection (`EXPR_NULLABLE`). CEL's `&&` and `||` absorb errors when the other side decides the result, so `booking.payment.method == 'units' && booking.entitlement.kind == 'membership'` is false, not an error, for a price-paid booking. For clarity, the examples still guard with `booking.entitlement != null`.
 
-**Null handling.** `customer.tier` is `null` when the customer holds no tiered entitlement. Comparisons with `null` follow CEL semantics (`null == 'x'` is false). Selecting a field of `null` is an evaluation error. Authors use `has()` or `!= null` guards, and the linter warns about unguarded nullable selections.
-
-## 5.4 Functions (extensions)
+## 5.4 Functions
 
 | Function | Signature | Meaning |
 |---|---|---|
-| `localDate` | `(timestamp, string zone) → string` | `"2026-11-03"` in that zone |
-| `localTime` | `(timestamp, string zone) → string` | `"18:30"` |
-| `weekday` | `(timestamp, string zone) → string` | `"tue"` |
-| `today` | `(string zone) → string` | `localDate(now, zone)` |
-| `hoursUntil` | `(timestamp) → double` | `(t - now)` in hours; negative if past |
-| `minutesBetween` | `(timestamp, timestamp) → int` | elapsed minutes, b − a |
-| `duration` | `(string) → duration` | CEL standard, e.g. `duration('2h')` |
-| `timestamp` | `(string) → timestamp` | CEL standard, RFC 3339 |
-| `hasTag` | `(Resource\|template\|session, string) → bool` | tag membership |
-| `hasSkill` | `(Resource, string) → bool` | non-expired skill |
-| `min`, `max` | `(number, number) → number` | |
-| `round`, `floor`, `ceil` | `(double) → int` | |
-| `size`, `contains`, `startsWith`, `endsWith`, `matches` | CEL standard | `matches` only with a literal pattern |
+| `localDate` / `localTime` / `weekday` | `(timestamp, zone) → string` | Wall-clock parts in the zone |
+| `today` | `(zone) → string` | `localDate(now, zone)` |
+| `hoursUntil` | `(timestamp) → double` | Hours from now until the timestamp |
+| `minutesBetween` | `(timestamp, timestamp) → int` | Elapsed minutes |
+| `duration` / `timestamp` | CEL standard | |
+| `hasTag` / `hasSkill` | `(x, string) → bool` | Tag test; skill test that ignores expired skills |
+| `min`, `max`, `round`, `floor`, `ceil` | numeric | |
+| `size`, `contains`, `startsWith`, `endsWith`, `matches` | CEL standard | `matches` takes a literal pattern only |
 
 ## 5.5 Sandbox limits
 
 | Limit | Value | Enforced at |
 |---|---|---|
-| Source length | 2,000 characters | compile |
-| AST nodes | 300 | compile |
-| Nesting depth | 12 | compile |
-| Static cost estimate (CEL cost model) | ≤ 5,000 | compile |
-| Runtime step budget | 10,000 evaluator steps | evaluate (aborts with `EXPR_BUDGET`) |
-| Comprehension input size | ≤ 256 elements | evaluate |
-| String or list produced | ≤ 1 KiB / 256 elements | evaluate |
-| Expressions per config | ≤ 2,000 | compile |
-| Wall-clock guard | 2 ms per evaluation, logged; not used for decisions | evaluate (metrics only) |
+| Source length | 2,000 chars | Compile |
+| AST nodes / nesting depth | 300 / 12 | Compile |
+| Static cost estimate | ≤ 5,000 | Compile |
+| Runtime step budget | 10,000 | Evaluate (`EXPR_BUDGET`) |
+| Comprehension input | ≤ 256 elements | Evaluate |
+| Produced string or list | ≤ 1 KiB / 256 elements | Evaluate |
+| Expressions per config | ≤ 2,000 | Compile |
+| Wall-clock guard | 2 ms, metrics only | Evaluate |
 
-Decisions depend only on deterministic limits: AST size, cost and step budget. Wall time is never a decision input, so a slow node cannot change an outcome.
+Decisions depend only on deterministic limits, never on wall time.
 
-## 5.6 Error semantics
+## 5.6 Error semantics (fail-safe values)
 
-The engine never treats an evaluation error as "true". Each slot defines its **fail-safe value**:
+| Use | On error |
+|---|---|
+| Eligibility (`eligible_if`, partition `eligible_if`, `covers`) | Not eligible (`EXPR_ERROR`) |
+| `approval.required_if` | Approval required |
+| `limits[].applies_if` / `count_if` | The limit applies / the booking counts |
+| `Penalty.fee_if` | No fee; logged and alerted |
+| `Penalty.waive_if` | Not waived for units; fee skipped; logged and alerted |
+| `price_rules[].when` | Rule skipped |
+| Selector `where`, `assignment_expr` | Candidate excluded |
+| Workflow `where` / `condition` / `when` | Action not run; run marked `condition_error` |
 
-| Slot use | On error | Reason code |
-|---|---|---|
-| Eligibility (`eligible_if`, `partitions[].eligible_if`, `covers`) | not eligible | `EXPR_ERROR` with the config path |
-| `approval.required_if` | approval required | `EXPR_ERROR` |
-| `limits[].applies_if` | the limit applies | — |
-| `limits[].count_if` | the booking counts | — |
-| `Penalty.fee_if` | no fee (do not charge on uncertainty) | logged and alerted |
-| `Penalty.waive_if` | not waived; the forfeit happens but the fee is skipped | logged and alerted |
-| `price_rules[].when` | rule skipped | logged |
-| `cost.units[].amount` | booking denied | `EXPR_ERROR` |
-| Selector `where`, `assignment_expr` | candidate excluded | — |
-| `rank.expr` | score 0 | logged |
-| Workflow `where`/`condition`/`when` | action not run | run marked `condition_error` |
+If one expression errors 10 or more times within an hour, the tenant's managers are alerted.
 
-Errors raise a `config.expression_error` event. Ten or more errors from one expression within an hour alert the tenant's managers.
-
-## 5.7 Examples
+## 5.7 Examples (all from §4b.1)
 
 ```cel
-// Physio: follow-ups need an assessment, completed or booked
-customer.history.tags['assessment'].completed > 0 || customer.history.tags['assessment'].upcoming > 0
-
-// Spin: charge a late-cancel fee only to unlimited members, and waive it when the bike was re-sold
-booking.payment.method == 'units' && booking.entitlement.kind == 'membership'     // fee_if
-booking.place_refilled                                                           // waive_if
-
-// Coworking: tier-dependent horizon
-customer.tier == 'team' || (customer.tier == 'resident' && hoursUntil(session.start) <= 336.0)
-
-// Restaurant: under-18s cannot serve dinner (selector where)
-candidate.resource.attributes.age >= 18
-
-// Workflow: only 6 a.m. classes
-weekday(session.start, session.zone) != 'sun' && session.local_start == '06:00'
+customer.tier == 'unlimited'                                                    // front-row partition
+booking.entitlement != null && booking.entitlement.kind == 'membership'         // late/no-show fee_if
+booking.place_refilled                                                          // late waive_if
+customer.history.tags['hot'].completed == 0                                     // first hot class → waiver form
+!('no_map' in candidate.resource.tags)                                          // vinyasa needs a mapped room
+row.location_key in me.location_keys && row.local_date == today(row.zone)       // desk "Today" view
 ```
