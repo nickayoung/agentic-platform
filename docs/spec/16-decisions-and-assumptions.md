@@ -65,13 +65,14 @@
 | D-59 | A freed place is reserved for the waitlist only if at least one waiting entry could be eligible for its partition | A front-row place isn't blocked by a waitlist that can't use it (review H-25) |
 | D-60 | At the classes cutover, mirrored future sessions are adopted into timetable series by (template, studio, local date, local start); unmatched ones become one-off sessions | No duplicate or lost classes at cutover (review H-12) |
 | D-61 | **Tenant databases are SQLite-backed Durable Objects**: one `TenantCore` (and one `TenantSync`, one `TenantAgent`) per tenant and environment, named `"{tenant}:{env}"`. D1 was rejected | Real transactions; single-writer audit chain; objects created by name with no per-tenant bindings; per-tenant point-in-time restore (§19.1, §19.2) |
-| D-62 | **Effect** for services, errors and runtime; **Effect Schema** replaces Zod for config, API and events; `@effect/platform` `HttpApi` generates OpenAPI 3.1 and TypeScript clients | One schema language from config to API to UI forms; typed errors map to reason codes (§19.11) |
+| D-62 | **Plain TypeScript with Zod 4 and Hono**: Zod for config, API and events; `@hono/zod-openapi` generates OpenAPI 3.1; ports are plain interfaces; one `KairosError` type. An effect system (Effect) was considered and not chosen | One schema language from config to API to UI forms, with widely used libraries that suit a small team working through coding agents (R-10, §19.11) |
 | D-63 | **A transaction never spans an `await`.** A command that needs an outside answer commits in a second transaction that re-reads and re-decides. Transaction bodies are synchronous and lint-checked | Keeps the single-writer guarantee meaningful; no decision is committed on a stale read (§19.2) |
 | D-64 | **SessionGate is an in-memory per-session queue inside `TenantCore`**, not a separate object | Ordering across `await`s without an extra hop; the object already serialises transactions (§19.3) |
 | D-65 | **One scheduler per object** drives its single alarm for hold expiry, promotion, timers, sagas, outbox and maintenance, waking at least every 60 s while work is pending, with a 5-minute Cron Trigger backstop. No queue product | A Durable Object has one alarm; one idempotent tick replaces every "sweep" (§19.5, §19.6) |
 | D-66 | **Simulations run in throwaway `SimulationRun` Durable Objects**; the CP-SAT solver runs in Cloudflare Containers | Simulations need the TypeScript engine and the production SQL dialect; the solver needs Python (§19.10) |
 | D-67 | **Kairos ships one UI, `kairos-console`, in TanStack Start.** It is a plain API client with no scheduling logic. The tenant's three front ends stay the tenant's | Owners and managers need the config, triage, roster and hours screens; principle "front ends render what the API returns" holds (§19.14) |
 | D-68 | **Hot data is bounded** to stay under the 10 GB object limit: decisions after 400 days and audit after 90 days move to R2 (audit to a locked bucket); alert at 6 GB | Seven-year audit retention without outgrowing one object (§19.7) |
+| D-69 | **Everything Kairos runs lives on Cloudflare**: compute, storage, timers, solver, console, logs, metrics and backups. The off-site backup copy is an R2 bucket in a separate Cloudflare account, not a second provider. Outside systems are reached through the gateway as before; load-test and synthetic-probe clients may run anywhere | Product constraint; one platform to operate. A Cloudflare-wide outage or loss is accepted as a risk (R-16) |
 
 ## 16.2 Assumptions
 
@@ -86,7 +87,7 @@
 | A-07 | The staff directory exposes people, groups, location, active state and email, plus `person.created` and `person.deactivated` events | Nightly sync only, so offboarding takes ≤ 24 h unless a manager deactivates the person in Kairos |
 | A-08 | Member emails are verified by the member sign-in service | Linking at the desk |
 | A-09 | All reference studios are in one time zone; the platform supports many | — |
-| A-10 | Cloudflare Containers can run the OR-Tools solver within the §15 timing targets, cold start included (Phase 0 spike, §19.17) | Keep a warm instance; else a container host outside Cloudflare reached through the gateway |
+| A-10 | Cloudflare Containers can run the OR-Tools solver within the §15 timing targets, cold start included (Phase 0 spike, §19.17) | Keep a warm instance and a larger instance type; else relax the targets with the product owner (D-69 rules out hosting elsewhere) |
 | A-11 | The processor supports authorise-then-capture, saved methods with consent, idempotency and dunning webhooks | Waitlist auto-charge degrades to offers; past-due handled manually |
 | A-12 | Server clocks on Workers and Durable Objects are within ±1 s | Hold margins absorb ±5 s |
 | A-13 | A TypeScript CEL library that **interprets** (no `eval` or `new Function`) passes the conformance subset inside `workerd`, or the profile is built in house | Phase 0 schedule risk |
@@ -170,7 +171,7 @@ The review is committed at `docs/reviews/review-3.md`, and the triage, change lo
 
 ## 16.6 Platform binding (v3.1)
 
-v3.1 binds the spec to Cloudflare Workers and Durable Objects, Effect and TanStack (§19). No domain behaviour changes.
+v3.1 binds the spec to Cloudflare Workers and Durable Objects, plain TypeScript (Zod, Hono) and TanStack (§19). Everything runs on Cloudflare (D-69). No domain behaviour changes.
 
 | Change | Where |
 |---|---|
@@ -180,7 +181,8 @@ v3.1 binds the spec to Cloudflare Workers and Durable Objects, Effect and TanSta
 | SessionGate moved inside `TenantCore`; "gate down" variants replaced by alarm-drop and restart variants | §19.3, §7.5, §7.7, §14.1, A.2, A.3, `a2_…`, `a3_…`, D-09, D-64 |
 | TimerObject and every sweep → one scheduler per object + backstop cron; `place.reserved_at` added | §19.5, §9.5, §12.4, §3A, §13.8, D-65 |
 | Outbox delivered from the scheduler; 6 in flight per object | §19.6 |
-| Zod → Effect Schema; `HttpApi` → OpenAPI | §4, §6.3, §11.1, §15, §19.11, D-62 |
+| Zod 4 + Hono `zod-openapi` → OpenAPI; plain ports | §4, §6.3, §11.1, §15, §19.11, D-62 |
+| Everything on Cloudflare: logs, metrics and the off-site backup copy moved onto Cloudflare | §12.9, §13.1, §13.9, §19.9, §19.11, D-69, R-16 |
 | CEL must interpret | §5.1, §19.12, A-13 |
 | Simulations in `SimulationRun`; solver in Cloudflare Containers | §6.4, §8.1, §19.10, D-66, A-10 |
 | Storage cap, archival, PITR | §12.9, §19.7, §19.9, D-68 |

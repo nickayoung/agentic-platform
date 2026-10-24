@@ -1,13 +1,13 @@
-# 19. Platform binding: Cloudflare, Effect, TanStack
+# 19. Platform binding: Cloudflare, TypeScript, TanStack
 
-§1–§18 describe Kairos in platform-neutral terms: "edge functions", "per-object stores", "one SQLite DB per tenant". This section binds those terms to the chosen stack and states the rules that follow from it. Where this section and an earlier one disagree, this section wins; the earlier sections have been patched to match (D-61 – D-68).
+§1–§18 describe Kairos in platform-neutral terms: "edge functions", "per-object stores", "one SQLite DB per tenant". This section binds those terms to the chosen stack and states the rules that follow from it. The one hard constraint is that **everything Kairos runs lives on Cloudflare** (D-69). Outside systems (the tenant's shared services, BookingVendor, ShiftTool, Stripe, the LLM provider) are still called through the gateway. Where this section and an earlier one disagree, this section wins; the earlier sections have been patched to match (D-61 – D-69).
 
 | Concern | Choice |
 |---|---|
 | Language | TypeScript (strict), ES2022 target, on the Workers runtime (`workerd`) |
-| Effects, services, errors | **Effect** (`effect`, `@effect/platform`) |
-| Schemas (config, API, events) | **Effect Schema** (`effect/Schema`). Replaces Zod everywhere (D-62) |
-| HTTP API and OpenAPI | `@effect/platform` `HttpApi`; OpenAPI 3.1 generated with `OpenApi.fromApi`; TypeScript clients with `HttpApiClient` |
+| Schemas (config, API, events) | **Zod 4** (D-62) |
+| HTTP API and OpenAPI | **Hono** with `@hono/zod-openapi`; OpenAPI 3.1 generated from the route definitions; TypeScript clients via `openapi-typescript` + `openapi-fetch` |
+| Services and errors | Plain interfaces passed explicitly; one `KairosError` type (§19.11) |
 | Compute | Cloudflare **Workers** |
 | Tenant databases | **Durable Objects with SQLite storage**, one object per tenant, environment and service (D-61) |
 | Timers | Durable Object **alarms**, plus one Cron Trigger as a backstop (§19.5) |
@@ -15,13 +15,14 @@
 | Solver | **Cloudflare Containers**, Python + OR-Tools CP-SAT (D-02 unchanged) |
 | Kairos console (UI) | **TanStack Start** (React) on Workers, with TanStack Router, Query, Form and Table (D-67) |
 | Tests | Vitest with `@cloudflare/vitest-pool-workers` (real `workerd`, real DO SQLite), `fast-check` for property tests |
+| Observability | Workers Logs (+ Logpush to R2), Workers tracing, Workers Analytics Engine (§19.11) |
 | IaC | `wrangler` configs per Worker and environment, applied from CI |
 
 ## 19.1 Topology
 
 ```
                     ┌────────────── Worker: kairos-api (stateless) ───────────────┐
- members/staff/ ──▶ │ JWT check · tenant resolve · Effect HttpApi decode · Cache API │
+ members/staff/ ──▶ │ JWT check · tenant resolve · Hono + Zod decode · Cache API     │
  agents             └──┬─────────────────────┬──────────────────────┬─────────────┘
                        │ RPC                 │ RPC                  │ RPC
               ┌────────▼────────┐   ┌────────▼────────┐   ┌─────────▼────────┐
@@ -56,9 +57,9 @@
 | `POST /internal/mirror/apply` (§12.1) | The RPC method `TenantCore.mirrorApply()`, called by `TenantSync`. It is not exposed over HTTP |
 | Preview vs production | Separate deployments of every Worker (`wrangler --env preview|production`). Each has its own DO namespaces, R2 buckets, secrets and gateway credentials, so a preview object can't address a production object |
 
-`kairos-api` holds no state. It checks the token (§13.2), resolves `(tenant, env)` through a cached `ControlPlane` read, decodes the request with the operation's Effect Schema, and calls the matching RPC method on the tenant's object. A tenant name is never built from user input other than the path slug, and only after the control plane has confirmed the slug exists (§13.1).
+`kairos-api` holds no state. It checks the token (§13.2), resolves `(tenant, env)` through a cached `ControlPlane` read, decodes the request with the route's Zod schema, and calls the matching RPC method on the tenant's object. A tenant name is never built from user input other than the path slug, and only after the control plane has confirmed the slug exists (§13.1).
 
-Services still don't read each other's databases (D-05). They call each other over Durable Object RPC, using Schema-encoded plain objects. Effect values and class instances never cross an RPC boundary.
+Services still don't read each other's databases (D-05). They call each other over Durable Object RPC, using plain objects that the receiving side parses with the same Zod schemas. Class instances never cross an RPC boundary.
 
 ## 19.2 Transactions replace guarded batches (D-61, D-63)
 
@@ -74,7 +75,7 @@ A Durable Object runs one request handler at a time between `await`s, and `trans
 - **Size budget.** A transaction must finish within **50 ms of CPU** and write **at most about 500 rows**. The object is single-threaded, so a long transaction stalls the whole tenant. Larger work uses sagas (§3A.1 C6) or idempotent chunks (§6.8), exactly as before; only the limit changed (A-06).
 - **Statement limits.** DO SQLite limits each statement to 100 KB of SQL and 100 bound parameters, and each row or blob to 2 MB. The occupancy inserts already use recursive CTEs, so they bind only a handful of parameters. Bulk inserts are chunked to stay under 100 parameters.
 
-The `Storage` service (§19.11) exposes only synchronous operations. Engine code that runs inside a transaction has no access to `Gateway`, `Rpc` or `Crypto` services, so a transaction body that tries to `await` fails to type-check.
+The `Tx` port (§19.11) exposes only synchronous operations. Engine code that runs inside a transaction receives only `Tx` and `Clock`, never `Gateway`, `Rpc` or `Crypto`, and `db.tx` rejects a callback that returns a promise.
 
 **Audit chain.** `audit.prev_hash` is read and the new `hash` is written in the same transaction. Writes are single-threaded per tenant, so the chain can't fork, which the D1-style batch design could not guarantee. `crypto.subtle.digest` is async, so the hash uses the synchronous `createHash('sha256')` from `node:crypto` (Workers `nodejs_compat` flag).
 
@@ -150,7 +151,7 @@ A SQLite-backed Durable Object can hold at most **10 GB**. The reference tenant 
 ## 19.9 Backups and restore
 
 - **Point-in-time restore.** SQLite-backed Durable Objects keep 30 days of point-in-time history. To restore one tenant's `TenantCore` (or `TenantSync`, or `TenantAgent`), an operator gets a bookmark with `ctx.storage.getBookmarkForTime(t)`, calls `onNextSessionRestoreBookmark(bookmark)`, and restarts the object. That restores one tenant without touching any other. The runbook is `ops/runbooks/restore-tenant.md`.
-- **Nightly logical export.** The scheduler writes an NDJSON export per table to R2. A `kairos-api` cron job copies each new export to an S3-compatible bucket at a second provider, using signed `fetch` requests (§12.9).
+- **Nightly logical export.** The scheduler writes an NDJSON export per table to R2. A `kairos-api` cron job copies each new export to an R2 bucket in a **separate Cloudflare account** with its own credentials and a bucket lock (§12.9). This protects against account-level mistakes and compromise. It does not protect against a Cloudflare-wide failure; that risk is accepted (R-16, D-69).
 - Restore drills (quarterly, §12.9) cover both paths.
 
 ## 19.10 Solver and simulations
@@ -169,25 +170,30 @@ A SQLite-backed Durable Object can hold at most **10 GB**. The reference tenant 
 
 This replaces "batch worker with an in-memory SQLite" in §6.4 and §7 (D-66). The L5 feasibility probe still runs in the solver container.
 
-## 19.11 Effect conventions (D-62)
+## 19.11 Application conventions (D-62)
 
-- **Schemas.** The config schema 2.1 (§4) is written once as Effect Schema in `packages/config-schema`. JSON Schema for agent tools comes from `JSONSchema.make`; the API components come from the `HttpApi` definition. `SCHEMA_INVALID` (L1, §6.3) is a failed `Schema.decodeUnknownEither`, and its `ParseError` is reported as JSON Pointer paths. Event contracts in `packages/contracts` are Effect Schemas too, published as versioned JSON Schema (§11.7).
-- **API.** `packages/contracts` defines the public API as an `HttpApi`. `kairos-api` implements it with `HttpApiBuilder` and serves it with `HttpApiBuilder.toWebHandler`. The OpenAPI 3.1 document is generated from it, and contract tests check that the generated document matches the committed one (§15 definition of done). TypeScript consumers, including the console, use `HttpApiClient`. Native apps use clients generated from the OpenAPI document.
-- **Errors.** Every reason code in §7.9 is a `Schema.TaggedError` with its HTTP status and fields. The `application/problem+json` body (§11.4) is produced from the error in one place. Defects (bugs) become `500` and are never shown as reason codes.
-- **Services.** Ports are `Context.Tag`s with `Layer` implementations:
+Plain TypeScript, with no effect system and no DI framework. The team is small and works mostly through coding agents (R-10), so the stack favours widely used libraries and simple control flow.
 
-  | Service | Production layer | Test / simulation layer |
+- **Schemas.** The config schema 2.1 (§4) is written once in **Zod 4** in `packages/config-schema`. JSON Schema for agent tools comes from `z.toJSONSchema`. `SCHEMA_INVALID` (L1, §6.3) is a failed `safeParse`, and each issue's `path` is reported as a JSON Pointer. Event contracts in `packages/contracts` are Zod schemas too, published as versioned JSON Schema (§11.7).
+- **API.** `packages/contracts` defines every route with `@hono/zod-openapi` (`createRoute`: path, request and response schemas, error codes). `kairos-api` is a **Hono** app that mounts those routes, so request validation and the OpenAPI 3.1 document come from the same definitions. The generated document is committed, and CI fails if it differs from the code (§15 definition of done). TypeScript consumers, including the console, use types from `openapi-typescript` with `openapi-fetch`. Native apps use clients generated from the same document.
+- **Errors.** One `KairosError` class carries `code` (a union of the §7.9 reason codes), HTTP status, `reasons[]` and `alternatives[]`. One Hono error handler turns it into `application/problem+json` (§11.4). Any other error is a bug: it becomes `500` and is never shown as a reason code. Engine decisions are plain `Decision` values; inside a transaction, a failed check throws `KairosError` so that SQLite rolls back.
+- **Ports.** Plain interfaces, passed explicitly in a `Deps` object built once per Worker or Durable Object:
+
+  | Port | Production | Test / simulation |
   |---|---|---|
-  | `Storage` (sync SQL, transactions) | `ctx.storage.sql` | the same, in `vitest-pool-workers` or `SimulationRun` |
-  | `Clock` | Effect's default clock | `TestClock` / virtual clock |
+  | `Tx` (sync SQL, only inside a transaction) | `ctx.storage.sql` | the same, in `vitest-pool-workers` or `SimulationRun` |
+  | `Clock` | `Date.now()` | virtual clock |
   | `Gateway`, `Notifier` | `fetch` with the service identity | recorded stubs (§14.3) |
   | `Crypto` (DEK, blind index) | WebCrypto + Secrets Store | fixed test keys |
   | `IdGen` | ULID | seeded |
 
-  The engine (`packages/engine`) depends only on `Storage` and `Clock`, so principle 1 (same config, snapshot, request and clock give the same decision) holds by construction.
-- **Synchronous transaction bodies.** A transaction body is an `Effect<A, E, TxServices>` that is run with `Effect.runSyncExit` inside `transactionSync`. If it ever suspends asynchronously, `runSyncExit` returns a failure, the transaction rolls back, and the defect is logged. A test in `packages/db` checks this behaviour.
-- **SQL access.** `packages/db` wraps `ctx.storage.sql` in a small typed `Storage` service. An `@effect/sql` client may replace the wrapper only if it keeps `transactionSync` semantics. That is a Phase 0 spike.
-- **Runtime.** Each Worker and each Durable Object class builds one `ManagedRuntime` from its layers per isolate. Request handling uses `Effect.withSpan`, and traces are exported over OTLP with `@effect/opentelemetry`, sampled as §13.9 says.
+  The engine (`packages/engine`) receives only `Tx` and `Clock`, so principle 1 (same config, snapshot, request and clock give the same decision) holds by construction.
+- **Synchronous transaction bodies.** `db.tx(fn)` wraps `transactionSync`. Its type rejects a callback that returns a promise (`T extends PromiseLike<unknown> ? never : T`). At runtime it also throws, and so rolls back, if the result is thenable. `Tx` exposes only synchronous methods. The lint rule `kairos/no-async-in-tx` and `@typescript-eslint/no-misused-promises` run in CI. A test in `packages/db` checks the runtime guard.
+- **SQL access.** No ORM. `packages/db` holds the SQL as tagged templates over `ctx.storage.sql`, with typed row decoders. The occupancy and hold SQL in §12 is written exactly as shown.
+- **Observability, all on Cloudflare.**
+  - *Logs* are structured JSON (§13.9) through Workers Logs. Logpush writes them to R2 under `logs/{tenant}/{env}/…`. Support staff read logs only through the console's log viewer, which enforces the tenant scoping of §13.1. Dashboard access to Workers Logs is limited to platform engineers.
+  - *Traces* use Workers tracing, which covers `fetch`, RPC and storage calls automatically, plus named spans for the SessionGate queue and each transaction. Sampling is set as §13.9 says.
+  - *Metrics* go to Workers Analytics Engine. An `ops` cron in `kairos-api` checks the §13.9 thresholds every minute and pages through the notification service.
 
 ## 19.12 CEL on Workers
 
@@ -206,9 +212,9 @@ Workers forbid generating code at runtime (`eval`, `new Function`). The CEL libr
 The tenant's three front ends (§18.4) remain the tenant's. Kairos ships one UI of its own: **`kairos-console`**, for owners, admins and managers. It is a TanStack Start app deployed as a Worker.
 
 **Rules.**
-- The console is an API client like any other front end. It calls the public API through `HttpApiClient`, wrapped in TanStack Query. It has no database access, no service binding to the Durable Objects, and no scheduling logic.
+- The console is an API client like any other front end. It calls the public API through the generated `openapi-fetch` client, wrapped in TanStack Query. It has no database access, no service binding to the Durable Objects, and no scheduling logic.
 - TanStack Start server functions are used only for the sign-in redirect (staff sign-in service) and for keeping the session cookie that carries the staff token. They do not proxy business calls.
-- Lists that the API paginates (§11.2) use cursor pagination in TanStack Table. Forms use TanStack Form with the operation's Effect Schema as the validator, so the client checks the same shape the server does, and the server stays authoritative.
+- Lists that the API paginates (§11.2) use cursor pagination in TanStack Table. Forms use TanStack Form with the route's Zod schema as the validator, so the client checks the same shape the server does, and the server stays authoritative.
 - Previews (`preview: true`, §11.2) are shown before every commit that has impact groups, and the commit sends `acknowledge`.
 
 **Screens by phase.**
@@ -227,7 +233,7 @@ If Kairos is later asked to build any of the tenant's own front ends, the same r
 
 ```
 apps/
-  api/            Worker kairos-api: HttpApi handlers, auth, cache, cron backstop
+  api/            Worker kairos-api: Hono app, auth, cache, cron backstop, ops cron
   core/           DO TenantCore + SimulationRun (engine wiring, scheduler, outbox)
   sync/           DO TenantSync (adapters, drift, shadow)
   agent/          DO TenantAgent (hooks, config agent)
@@ -235,8 +241,8 @@ apps/
   console/        TanStack Start app (kairos-console)
   solver/         Python container image (OR-Tools CP-SAT)
 packages/
-  contracts/      HttpApi definition, event schemas, generated OpenAPI
-  config-schema/  config schema 2.1 (Effect Schema), YAML parse, canonical JSON
+  contracts/      zod-openapi routes, event schemas, generated OpenAPI
+  config-schema/  config schema 2.1 (Zod), YAML parse, canonical JSON
   expr/           CEL profile (interpreter, §19.12)
   engine/         booking engine, person-rule validator (pure; Storage + Clock)
   workflow/       workflow engine
@@ -262,6 +268,6 @@ Each spike has a written result in `docs/spikes/` before the Phase 0 acceptance 
 1. **CEL interpreter** passes the conformance subset inside `workerd` (A-13, §19.12).
 2. **Throughput:** one `TenantCore` sustains 300 holds/s on one class plus 300 other requests/s, with p95 inside §7.11 (R-03, R-13).
 3. **Solver cold start** and solve times for the §15 targets, on the chosen instance type.
-4. **`@effect/sql` on DO SQLite** keeps `transactionSync` semantics, or the in-house wrapper stays.
+4. **Console on Workers:** TanStack Start deployed as a Worker, signing in with the staff sign-in service and calling preview through the generated client.
 5. **Point-in-time restore drill** on a preview tenant.
 6. **Storage growth:** a year of reference-tenant volume (§12.9), generated synthetically, stays under the 6 GB alert with the §19.7 retention.

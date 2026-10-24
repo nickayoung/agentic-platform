@@ -9,11 +9,11 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 - **Phase 0 spikes** (§19.17), each with a written result before the acceptance review.
 - **Control plane:** tenant lifecycle states (`provisioning` → `onboarding`).
 - **Identity:** token validation for both sign-in services; role mapping; token exchange for service and agent clients.
-- **Config:** schema 2.1 in Effect Schema (2.0 documents accepted and upgraded); `packages/expr` (CEL interpreter, §19.12); the `HttpApi` definition in `packages/contracts`.
+- **Config:** schema 2.1 in Zod 4 (2.0 documents accepted and upgraded); `packages/expr` (CEL interpreter, §19.12); the `@hono/zod-openapi` route definitions in `packages/contracts`.
 - **Manual config pipeline**, used without the agent: draft → validate L1–L4 → impact → approve → publish → rollback.
-- **Storage:** core tables and migrations-on-start (§19.8); the `Storage` service and transaction helper with the transaction lint (§19.2); occupancy; hash-chained audit; the scheduler (§19.5) and outbox delivery (§19.6); the saga runner (§3A.1 C6); pruning and R2 archival (§19.7); flags.
+- **Storage:** core tables and migrations-on-start (§19.8); the `db.tx` helper and `Tx` port with the transaction lint (§19.2); occupancy; hash-chained audit; the scheduler (§19.5) and outbox delivery (§19.6); the saga runner (§3A.1 C6); pruning and R2 archival (§19.7); flags.
 - **Kairos console** (§19.14): the Phase 0 screens (config pipeline, domain modes and flags, tenant lifecycle).
-- **Ops and sync:** observability baseline (§13.9); `kairos-sync` skeleton with read-only BookingVendor and ShiftTool adapters through the gateway.
+- **Ops and sync:** observability baseline on Workers Logs, tracing and Analytics Engine (§13.9, §19.11); `kairos-sync` skeleton with read-only BookingVendor and ShiftTool adapters through the gateway.
 
 **Acceptance**
 1. Both §4b fixtures pass the **real** validator (L1–L4, including the lane-aware `COVERAGE_UNCOVERABLE`, run in CI on every commit), compile to their golden hashes, and publish through the manual pipeline. `lotus_line.yaml` reports no `NOTICE_MISSING`. CI also checks that `fixtures/configs/*.yaml` are identical to the YAML blocks in §4b, and the L5 probe on `lotus_line.yaml` with a seeded staff set returns feasible.

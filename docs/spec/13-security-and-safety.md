@@ -9,7 +9,7 @@
 | Durable Objects | Each object is named `"{tenant}:{env}"` (or `"{tenant}:{env}:sim:{run_id}"`) and checks the tenant and environment of every RPC call against its own name. |
 | Caches | Keyed by tenant, environment and `config_epoch`. Authenticated responses are `Cache-Control: private`. |
 | Agents | Agent tokens are minted per tenant. Prompts and hook inputs contain one tenant's data only. Hook runs are stored in that tenant's `kairos-agent` database. |
-| Logs | Every log line carries `tenant` and `env`. The log store is partitioned by tenant, and people with support access see only the tenants assigned to them. Request bodies of member endpoints are never logged. Logs are kept for 30 days. |
+| Logs | Every log line carries `tenant` and `env`. The log store (Logpush to R2 under a per-tenant prefix, §19.11) is partitioned by tenant, and people with support access see only the tenants assigned to them. Request bodies of member endpoints are never logged. Logs are kept for 30 days. |
 | Solver and simulation | Inputs are pseudonymised. Job payloads are tagged with the tenant and deleted after 7 days. |
 | Preview → production | (a) Preview services hold preview gateway credentials only. (b) The gateway maps preview to the outside systems' sandboxes, or to `record_only` (logged, never forwarded). (c) The gateway rejects any preview call aimed at a production endpoint. (d) CI asserts that the preview gateway config has no production endpoints. (e) Preview is seeded weekly from a **pseudonymised** production copy, with names, emails and phones replaced and processor references removed. |
 
@@ -112,7 +112,7 @@ On every request, Kairos also checks the person's or member's `state` (cached fo
 ## 13.9 Observability
 
 - **Logs.** Structured JSON with `ts`, `tenant`, `env`, `service`, `request_id`, `decision_id`, `actor_type`, `route`, `status`, `latency_ms` and `code`. No PII.
-- **Traces.** OpenTelemetry spans (Effect tracing, exported over OTLP, §19.11) for `kairos-api` → `TenantCore` RPC → SessionGate queue → transaction → outbox → gateway, sampled at 10 %, and at 100 % on errors.
+- **Traces.** Workers tracing spans (§19.11) for `kairos-api` → `TenantCore` RPC → SessionGate queue → transaction → outbox → gateway, sampled at 10 %, and at 100 % on errors.
 - **Metrics and alerts** (each alert links to a runbook in `ops/runbooks/<alert>.md`):
 
 | Metric | Alert threshold |

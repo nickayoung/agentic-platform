@@ -252,4 +252,4 @@ Each saga step's batch checks `saga.step` and advances it in the same transactio
   | Audit log | 7 years; segments older than 90 days are archived to a locked R2 bucket (still hash-chained, §19.7) |
 
 - **Schema migrations:** numbered SQL files in `packages/db/migrations`, applied by each object in its constructor before it serves a request (§19.8), as **expand → migrate → contract**. Code supports schema versions N and N−1. Preview databases migrate first, then production after a 24 h soak.
-- **Backups:** Durable Object point-in-time restore (30 days, per object, so per tenant), plus a nightly logical export to R2 that is copied to S3-compatible storage at a second provider (§19.9). Restore drills run quarterly. The engine release process is in §13.10.
+- **Backups:** Durable Object point-in-time restore (30 days, per object, so per tenant), plus a nightly logical export to R2 that is copied to a locked R2 bucket in a separate Cloudflare account (§19.9, D-69). Restore drills run quarterly. The engine release process is in §13.10.

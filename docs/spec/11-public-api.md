@@ -8,7 +8,7 @@ The API is REST, not GraphQL, for five reasons:
 - **Precise writes.** Hold, confirm, cancel and approve are commands that need idempotency keys, precise error codes and decision traces.
 - **Agent tooling.** Each operation is one typed agent tool with its own allowlist entry.
 - **Bounded cost.** Query cost is bounded on single-writer SQLite.
-- **Generated clients.** An Effect `HttpApi` definition in `packages/contracts` → OpenAPI 3.1 → clients: `HttpApiClient` for TypeScript (website, desk app, portal, Kairos console) and generated clients for the native apps (§19.11).
+- **Generated clients.** Zod route definitions (`@hono/zod-openapi`) in `packages/contracts` → OpenAPI 3.1 → clients: `openapi-typescript` + `openapi-fetch` for TypeScript (website, desk app, portal, Kairos console) and generated clients for the native apps (§19.11).
 
 `include=` expansions cover the common joins.
 

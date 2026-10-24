@@ -43,5 +43,6 @@
 | R-11 | A Phase 3 class cancel push fails and members arrive to a cancelled class | L | H | Push retries within 10 min, then an urgent task and a non-rate-limited staff page (§3A.9.4) |
 | R-12 | §3A grows out of step with the mechanisms in §7–§12 | M | M | One test file per lifecycle card (§14.1); a card change requires its test change in the same PR |
 | R-13 | One `TenantCore` object is the ceiling for a tenant's total request rate (about 1,000 simple requests/s) | L | H | Edge cache for anonymous reads (≥ 90 % hits); alert at 600 requests/s; fallback: a read-model object fed from domain events (§19.4) |
-| R-14 | A transaction body awaits by mistake, or a two-part command trusts a pre-`await` read | M | H | Synchronous `Storage` service; lint; `runSyncExit` defect test; re-read-and-re-decide rule with mandatory tests (§19.2, §14.1) |
+| R-14 | A transaction body awaits by mistake, or a two-part command trusts a pre-`await` read | M | H | Synchronous `Tx` port; `db.tx` type and runtime guard; lint; re-read-and-re-decide rule with mandatory tests (§19.2, §14.1) |
 | R-15 | Solver container cold start breaks the §15 timing targets | M | L | Warm-up ping from the console; targets measured end to end in the Phase 0 spike (§19.10) |
+| R-16 | A Cloudflare-wide outage or data loss, with no second provider (D-69) | L | H | Per-object point-in-time restore; nightly export to a locked R2 bucket in a separate Cloudflare account; desk check-ins queue offline (§7.12); the tenant's own systems stay the record until each domain's cutover |
