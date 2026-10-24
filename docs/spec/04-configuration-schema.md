@@ -6,7 +6,7 @@ The config document is one JSON object per tenant and environment. It is authore
 
 ```ts
 interface ConfigDocument {
-  schema_version: '2.0';
+  schema_version: '2.0' | '2.1';        // 2.1 adds only optional fields (min_rest scopes, refund.late, workflow scope, event lists)
   tenant: TenantSettings;
   locations: LocationDef[];              // studios
   units: UnitDef[];
@@ -34,6 +34,7 @@ interface ConfigDocument {
 
 - Every collection is present. An empty collection is written as `[]`.
 - A minor bump to `schema_version` may only add optional fields. A major bump ships with a migration function (`migrate_2_to_3`) that is tested against every stored version.
+- **2.1** (spec v3.0) adds: `min_rest.from` / `min_rest.to` (§4.11), `refund.late` (§4.8), `WorkflowDef.scope` and a list form of `trigger.event` (§4.12), `tenant.member_messaging` (§4.3), `processor_price_ref` (§4.9). A 2.0 document is a valid 2.1 document with the defaults; publishing rewrites `schema_version` to `2.1`.
 
 ### 4.1.1 Locked paths
 
@@ -79,9 +80,11 @@ interface TenantSettings {
   materialize_horizon: Duration;         // default "8w"
   customer_label: string;                // "member"
   fee_ceiling: Money;                    // LOCKED; default 100.00 in tenant currency
-  closure_pay_notice: Duration;          // §3.12.2; default "2h"
+  closure_pay_notice: Duration;          // §3A.16: a studio cancel committed less than this before start keeps staff hours; default "2h"
   closing_notice: Duration;              // notice to members when the tenant closes; default "14d"
   refund_credit_product: Key;            // pack granted when refund.timely = 'credit' (§4.8)
+  member_messaging?: 'kairos' | 'record_holder';   // 2.1; default 'record_holder'. Who messages members about records an
+                                         //   outside system still holds (§9.3, D-51)
   payroll_export: PayrollExportSettings; // LOCKED; Gusto CSV settings (§18.8.3)
   environment_guards: { preview_outbound: 'sandbox' | 'record_only' };   // LOCKED
 }
@@ -192,7 +195,7 @@ interface CostSpec {
 
 A private class is a one-off session of a template with `{ mode: pooled, places: 1 }`.
 
-**Shift candidates.** A rostered template yields one candidate shift for each matching `starts` entry, day and studio. A candidate is generated **only if** `[start, start + duration)` lies inside the availability of the requirement's `fixed` resource (the front desk) on that day. Since a desk follows its studio's hours (§4.10), shifts never fall outside opening hours. `COVERAGE_UNCOVERABLE` (§6.3) is evaluated against these candidates only.
+**Shift candidates.** A rostered template yields one candidate shift for each matching `starts` entry, day and studio. A candidate is generated **only if** `[start, start + duration)` lies inside the availability of the requirement's `fixed` resource (the front desk) on that day. Since a desk follows its studio's hours (§4.10), shifts never fall outside opening hours. `COVERAGE_UNCOVERABLE` (§6.3) is evaluated against these candidates only, **and respects the desk's lanes**: at every 5-minute grain, the chosen candidates may not need more lanes than the desk's `concurrency`. Shift handovers overlap, so a desk whose opening and closing shifts overlap needs at least 2 lanes.
 
 ## 4.7 Timetable and series edits
 
@@ -249,6 +252,8 @@ interface Penalty {
 interface RefundRules {
   timely: 'full' | 'credit' | 'none';    // a price-paid booking cancelled before free_until
                                          //   'credit' = grant one entitlement of tenant.refund_credit_product instead of money
+  late?: 'none' | 'as_timely_if_refilled';   // default 'none' (2.1). A price-paid LATE cancel: no refund, or refund per
+                                         //   `timely` when booking.place_refilled is true at assessment (§7.6, D-48)
   studio_cancel: 'full';                 // the studio cancels (unstaffed, closure, minimum attendance): always a full refund
 }
 interface BookingLimitDef { key: Key; window: 'day' | 'week' | 'month' | 'upcoming'; max: number;
@@ -263,7 +268,8 @@ interface WaitlistPolicy {
 
 - **`studio_cancel = full`** means: reserved units are released, price-paid bookings are refunded in full, and any late fee already charged for that session is reversed.
 - **Partial refunds** exist only as `refund` proposals approved by a manager (§11.3).
-- **`unstaffed`**: at `check_at`, if any `roster` requirement is still empty, the engine either cancels the class with `reason: no_staff` or notifies staff (§7.1).
+- **`refund.late`** applies only to price-paid bookings. Units follow `late.forfeit_units` and `waive_if`; fees follow `fee_if` and `waive_if` (§7.6).
+- **`unstaffed`**: at `check_at`, if any `roster` requirement is still empty (or the room is missing), the engine either cancels the class with `reason: no_staff` / `no_room` or notifies staff (§3A.9.5).
 - **Waitlist priority**: waitlisted members always have priority over new bookings (D-27).
 
 ## 4.9 Entitlement products
@@ -281,6 +287,7 @@ interface EntitlementProductDef extends FlagRef {
   priority: number;
   sold_by: 'platform' | 'external';
   price?: Money;
+  processor_price_ref?: string;          // 2.1: the processor's price ID for platform-sold products (Stripe Price, §18.10)
 }
 ```
 
@@ -301,7 +308,7 @@ interface AvailabilityRuleDef {
 - A room or desk is available when an `open` rule covers it and no `closed` rule does.
 - If no `open` rule names a resource, the resource follows its studio's hours.
 - A studio with no `open` rule is always open.
-- Same-day closures (weather, power cut) use the closures API (§3.12.2), not config.
+- Same-day closures (weather, power cut) use the closures API (§3A.4.1), not config.
 
 ## 4.11 Constraints and coverage
 
@@ -313,7 +320,9 @@ interface ConstraintDef extends FlagRef {
   rule:
     | { type: 'max_hours'; window: 'day' | 'week' | 'rolling_7d'; hours: number; counts?: Counts }
     | { type: 'min_hours'; window: 'week'; hours: number }
-    | { type: 'min_rest'; duration: Duration }      // from one claim's occ_end to the next claim's occ_start, buffers included
+    | { type: 'min_rest'; duration: Duration;       // from one claim's occ_end to the next claim's occ_start, buffers included
+        from?: { template_tags?: string[] };        // 2.1: only when the EARLIER claim's template has one of these tags
+        to?: { template_tags?: string[] } }         // 2.1: only when the LATER claim's template has one of these tags
     | { type: 'max_consecutive_days'; days: number; counts?: Counts }
     | { type: 'max_assignments'; window: 'day' | 'week'; count: number; counts?: Counts }
     | { type: 'transfer_time' }
@@ -327,6 +336,8 @@ interface CoverageDef extends FlagRef {
   level: 'hard' | 'soft'; weight?: number; except_dates?: LocalDate[];
 }
 ```
+
+**`min_rest` scopes (2.1).** With no `from`/`to`, the rest applies between **every** pair of consecutive claims of the person. With `from` and/or `to`, it applies only to pairs whose earlier claim matches `from` and whose later claim matches `to`. For example, `desk_rest` in §4b.1 (`from: closing`, `to: opening`) requires 10 h between a closing shift and the next opening shift, and nothing between an opening shift and an evening class. Blocks have no template and match no scope.
 
 `type Counts = 'all_work' | 'matching'`, default `all_work`.
 - `applies_to` chooses **which people** the rule applies to.
@@ -342,7 +353,8 @@ So `desk_week` in §4b.1 limits a desk worker's teaching plus desk hours to 40.
 ```ts
 interface WorkflowDef extends FlagRef {
   key: Key; name: string;
-  trigger: { event: EventName; where?: Expr }
+  scope?: 'owned' | 'all';               // 2.1; default 'owned' (§9.3, D-51)
+  trigger: { event: EventName | EventName[]; where?: Expr }   // list form (2.1): any of the events
          | { at: { relative_to: 'session.start' | 'session.end' | 'booking.created';
                    offset: SignedDuration; templates_tagged?: string[]; templates?: Key[];
                    for_each?: 'session' | 'booking' } }

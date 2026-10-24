@@ -1,6 +1,6 @@
 # Kairos for Yoga Studios — Technical Specification
 
-**Status:** Draft v2.1 (yoga-only; second review applied) · **Audience:** platform engineers and coding agents · **Date:** 2026-10-24
+**Status:** Draft v3.0 (yoga-only; third review applied) · **Config schema:** 2.1 · **Audience:** platform engineers and coding agents · **Date:** 2026-10-24
 
 Kairos is a scheduling platform for **multi-studio yoga businesses**. The studio owner describes how the business works: studios, rooms, mat layouts, class types, timetable, memberships, cancellation rules, desk cover. A configuration agent compiles that description into a typed, versioned configuration document. Deterministic engines execute it. No LLM call sits in the booking path.
 
@@ -15,12 +15,25 @@ v1.0 targeted five business shapes. v2.0 is **yoga studios only** (D-25):
 - **Folded in:** every Blocker and Major finding from the v1.0 review. The trace is in §16.3.
 - **v2.1:** applies the second review (G-01 – G-23, trace in §16.4): built-in behaviour only on owned domains (§7.13), per-studio desk shift starts, staff role mappings, offer-to-hold atomicity, strike decay, payroll source per phase, the eval grammar and the acceptance scenario files.
 
+## What changed in v3.0
+
+v3.0 applies the third review (H-01 – H-28). The review is in [`docs/reviews/review-3.md`](../reviews/review-3.md); the triage, change log, acceptance traces and open items are in [`docs/reviews/v3-revision.md`](../reviews/v3-revision.md). The main changes:
+
+- **New §3A Lifecycles.** One card per lifecycle event, giving trigger, state changes, dependants, notifications, outside systems per mode, audit, and failure and recovery. §3.12 is replaced by a pointer, and other sections refer to §3A instead of restating it.
+- **Mixed-mode rule (D-44).** An event that spans domains runs natively only for owned domains. For example, a Phase 3 class cancel is pushed to BookingVendor, which settles its bookings.
+- **Schema 2.1** (optional fields only): `min_rest.from/to`, `refund.late`, workflow `scope`, and a list form of `trigger.event`.
+- **Reference config fixed:** 2-lane desks (D-45), a closing → opening `desk_rest` (D-46), `refund.late: none`, and workflows for every required notice.
+- **Shifts go through shadow** before owner (D-47). **Substitute accepts** are single-creator and DB-guarded (D-57).
+- **Acceptance fixtures fixed and extended** (A.3–A.5).
+- **Kairos manages everything except payroll** (product owner): it sends every member and staff message from go-live (`tenant.member_messaging: kairos`, D-51), and uses **Stripe** for checkout, fees, refunds and memberships (§18.10).
+
 ## Contents
 
 | # | Section | File |
 |---|---|---|
 | 1–2 | Overview, design principles, glossary | [01-overview-and-glossary.md](01-overview-and-glossary.md) |
-| 3 | Domain model and lifecycles | [03-domain-model.md](03-domain-model.md) |
+| 3 | Domain model | [03-domain-model.md](03-domain-model.md) |
+| 3A | **Lifecycles** (added in v3.0, review H-07) | [03a-lifecycles.md](03a-lifecycles.md) |
 | 4 | Configuration schema | [04-configuration-schema.md](04-configuration-schema.md) |
 | 4b | Example configurations (reference tenant + single-studio variant) | [04b-example-configs.md](04b-example-configs.md) |
 | 5 | Expression language (CEL profile) | [05-expression-language.md](05-expression-language.md) |
@@ -54,7 +67,7 @@ This restates the original test for yoga only (D-25). The spec passes if all of 
 |---|---|
 | Tenant expressed through the schema | §4b.1, Appendix A.1 |
 | Mat-hold race | §7.5, §12.4, Appendix A.2 |
-| Late cancel with waitlist promotion | §7.6–7.7, §9.6, Appendix A.3 |
-| Instructor sick call | §8.6, §10.4, Appendix A.4 |
-| Built-in behaviour only on owned domains | §7.13 |
+| Late cancel with waitlist promotion | §3A.12–§3A.13, §7.6–7.7, §9.6, Appendix A.3 |
+| Instructor sick call | §3A.11.2, §3A.14, §8.6, §10.4, Appendix A.4 |
+| Built-in behaviour only on owned domains; mixed-mode events | §3A.1 C4, §3A.2, §7.13 |
 | Mirror classes + owner desk shifts | §12.3, §18.5, Appendix A.5 |

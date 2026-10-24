@@ -21,7 +21,7 @@ Unit tests cover:
 - CEL functions and fail-safes;
 - recurrence expansion;
 - migration plans;
-- lifecycle operations (§3.12), with one test file per table row.
+- lifecycle operations (§3A), with one test file per lifecycle card or table row, each covering its failure-and-recovery row.
 
 ### Property tests
 
@@ -47,7 +47,11 @@ After every step the harness asserts:
 | Balances ≥ 0 and equal the ledger; every reserve resolved exactly once | I-24, I-25 |
 | Counters equal recomputed counts | §12.5 |
 | No mirrored record dropped; no platform claim overlaps a conflicted mirrored claim | I-18 |
-| No assignment for an inactive person after `effective` | §3.12.4 |
+| No assignment for an inactive person after `effective` | §3A.6 |
+| Every confirmed owned assignment has exactly one non-voided hours record; no hours record for a mirrored assignment | I-28b, D-54 |
+| At most one accepted substitute offer per slot; every lapsed offer's proposal is failed, rejected or expired | D-57 |
+| No booking, waitlist or ledger row written by Kairos for a domain it doesn't own | §3A.2, C4 |
+| Every saga is `done`, `parked` (with a task) or resumable; no saga step applied twice | C6 |
 | Replaying a request with the same config, snapshot and clock gives an identical trace | Principle 1 |
 
 ### Assert-pattern tests (F-01)
@@ -69,6 +73,8 @@ One test is mandatory: a concurrent version bump between the read and the write.
 | Rest-rule race | Two assignments that each pass `min_rest` alone but together break it | One aborts with `STALE_VERSION` and then fails validation |
 | Hold timing | Alarm lost; alarm duplicated; confirm racing the expiry | Each case resolves with no double claim |
 | Two managers | Two managers apply proposals that touch the same person-days | The second one re-validates |
+| Substitute double accept | Two of three open substitute offers accepted within 5 ms, interleaved at every statement boundary | Exactly one `accepted` offer and one proposal; the other gets `409 OFFER_FILLED` |
+| Retime vs hold | A session retime racing a member's confirm of an existing hold | Either the confirm commits first (and the booking is moved with the session), or the confirm gets `SESSION_CHANGED` |
 
 ### DST matrix
 
@@ -116,11 +122,15 @@ Zones: `America/New_York` and `Europe/London`.
 
 Every row of §7.13 runs in each of the three modes. In `mirror`, the test asserts no writes and no outbox rows. In `shadow`, it asserts a dry-run decision is logged and nothing else is written. In `owner`, it asserts the full effect.
 
-Required case: in the Phase 1 configuration (classes mirrored), a mirrored class with 1 booking passes its minimum-attendance time, and Kairos does **not** cancel it.
+Required cases:
+- In the Phase 1 configuration (classes mirrored), a mirrored class with 1 booking passes its minimum-attendance time, and Kairos does **not** cancel it.
+- In the Phase 3 configuration (classes owner, bookings shadow), an unstaffed cancel writes no booking, ledger or refund rows, and one `no_sub_notice` notify row per mirrored session customer. It writes exactly one outbox push `gateway.booking_vendor.classes.cancel`, and the dry-run studio cancel is compared with the mirrored outcome.
+- Workflow scope: with `member_messaging: kairos` and bookings mirrored, `class_reminder` and `no_sub_notice` notify the mirrored bookings' customers. With `record_holder`, they create no notify rows and `recipient_not_owned` is logged.
+- Each row of §3A.18's in-flight tables, for both directions.
 
 ### Static rule
 
-A lint fails the build if `packages/engine/**` reads `TemplateDef.kind` or compares a value to `'class'` or `'shift'`.
+A lint fails the build if `packages/engine/**` or `packages/workflow/**` reads `TemplateDef.kind` or compares a value to `'class'` or `'shift'`. The only allowed reader is `packages/export/**`, which derives the payroll label `kind` (`shift` or `teaching`) from an hours record's `template_key` at export time (D-56).
 
 ### Scenario DSL
 
@@ -156,15 +166,16 @@ then:
 
 | Key | Meaning |
 |---|---|
-| `config`, `domain_modes`, `clock`, `gate` | The config fixture; the mode of each domain; the virtual start time; `unavailable` to simulate a SessionGate outage |
-| `given` | Seed data: `customers`, `people`, `sessions` (`series@date`, `fill`, `bookings`, `waitlist`, `assignments`, `payments`), `person_mappings` |
-| `when` / `steps` | Actions: `hold`, `confirm`, `cancel`, `accept_offer`, `approve_proposal`, `assign`, `solve`, `time_off`, `mirror_event`, `advance_to`, `at` (run the step at a time), `concurrent` (submit the listed steps within 50 ms), `as` (name a result), `expect` (expected status or code) |
+| `config`, `domain_modes`, `clock`, `gate`, `outside` | The config fixture; the mode of each domain; the virtual start time; `unavailable` to simulate a SessionGate outage; `outside: { <system>: available \| unavailable \| rejects }` for gateway behaviour |
+| `given` | Seed data: `customers` (`entitlements`, `pays`), `people` (`roles`, `skills`, `email`), `sessions` (`series@date`, `fill`, `bookings`, `waitlist`, `assignments`, `payments`), `person_mappings` |
+| `when` / `steps` | Actions: `hold`, `confirm`, `cancel`, `send_offer`, `accept_offer`, `approve_proposal`, `assign`, `solve`, `time_off`, `mirror_event`, `advance_to`, `at` (run the step at a time), `concurrent` (submit the listed steps within 50 ms), `as` (name a result), `expect` (expected status or code) |
 | `then` | Assertions: `booking(s)`, `balance`, `ledger`, `place`, `place_claims`, `claim`, `session`, `assignment`, `offer(s)`, `proposal`, `waitlist_entry`, `event`, `outbox` (`none_matching` uses a glob), `drift`, `writes` (`none_except`), `result`, `exactly_one_of`, `other_result`, `solution`, `within` (seconds) |
 | `variants` | Re-run with `given_override`, `clock`, `domain_modes`, `gate` and extra `steps`, checked against the variant's own `then` |
 
 Required scenario suites:
-- **Acceptance (A.2–A.5)**, committed in `fixtures/scenarios/lotus_line/a2_…a5_*.yaml`: mat race, late cancel and waitlist with all five variants, sick call (filled / proposal expired / no substitute → studio cancel and refunds), mirror classes + owned desk shifts (both orders, plus an unmapped teacher).
-- **Lifecycle:** studio closure, mat block re-seat, staff immediate deactivation, member merge, freeze, past-due, close account.
+- **Acceptance (A.2–A.5)**, committed in `fixtures/scenarios/lotus_line/a2_…a5_*.yaml`: mat race; late cancel and waitlist with all variants (including price-paid canceller and front row before release); sick call (filled / became busy / accepted late / double accept / no substitute → studio cancel and refunds in owner mode / Phase 3 push to BookingVendor / push fails); mirror classes + owned desk shifts (all three orders, the after-the-class desk shift, and the mode guard).
+- **Lifecycle:** studio closure, mat block re-seat, staff immediate deactivation, member merge, freeze, past-due, close account, session retime and room change with bookings (§3A.9.2), studio cancel with a failed push (§3A.9.4), planned time off approval, swap reject, hours void and `pay_protected`.
+- **Config rules:** `desk_rest` allows desk-open + evening class and refuses desk-close + next-day desk-open within 10 h; a 1-lane Dumbo desk fails `COVERAGE_UNCOVERABLE`.
 
 ## 14.2 Fixtures
 

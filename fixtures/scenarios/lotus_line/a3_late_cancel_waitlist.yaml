@@ -39,6 +39,20 @@ variants:
       - result: { ref: h, status: 201, has: hold_id }
       - confirm: { hold: h }
       - booking: { customer: eli, place: mat_3, state: confirmed }
+  - name: price-paid canceller, mat refilled, refund.late none
+    given_override: { customers: [{ id: cara, entitlements: [], pays: { method: price, amount: 3000 } }] }
+    then:
+      - booking: { customer: dana, place: mat_3, state: confirmed, booked_via: waitlist }
+      - advance_to: "2027-03-09T18:30:00-05:00"
+      - event: { name: booking.penalty_assessed, customer: cara, data: { waived: true, refund: none } }
+      - outbox: { none_matching: "refund:*cara*" }
+      - outbox: { none_matching: "fee:*cara*" }
+  - name: front row freed before its release, only an unlimited member is eligible
+    clock: "2027-03-08T12:00:00-05:00"
+    then:
+      - place: { session: wb_vinyasa_1830@2027-03-09, place: mat_3, partition: front_row_unlimited }
+      - booking: { customer: eli, place: mat_3, state: confirmed, booked_via: waitlist }
+      - waitlist_entry: { customer: dana, state: waiting }
   - name: gate down
     gate: unavailable
     then:

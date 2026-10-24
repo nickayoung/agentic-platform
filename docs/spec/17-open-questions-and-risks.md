@@ -5,7 +5,7 @@
 | ID | Question | Recommended answer | Needed by |
 |---|---|---|---|
 | Q-01 | Does BookingVendor support reserving a mat during checkout? | If not, mirror-mode holds are advisory and the "taken" result comes from BookingVendor (§7.12) | Phase 2 |
-| Q-02 | When a studio closes at short notice, are desk staff paid for the shift? | Pay if the closure is posted less than 2 h before the shift (`closure_pay_notice`) | Phase 1 |
+| Q-02 | *(Resolved: staff are paid for any studio cancel committed less than `closure_pay_notice` (2 h) before start; D-55.)* | — | — |
 | Q-03 | Should instructors who also work the desk have a total weekly cap above the desk cap (New York labour rules)? | Keep 40 h combined until legal confirms | Phase 1 |
 | Q-04 | Are workshops (multi-session series sold as one product) and per-mat surcharges needed? | Out of v2.0; consider for schema 2.1 | Phase 6 |
 | Q-05 | Should a desk shift be vacated automatically when BookingVendor assigns that person a class over it (D-34)? | Not at first. Revisit after 30 days of Phase 1 conflict data | Phase 1 + 30 d |
@@ -20,6 +20,11 @@
 | Q-14 | The exact header rows of the tenant's Gusto employee and contractor CSV templates, and which column Gusto matches people on (employee ID or name) | Download both templates in Gusto at onboarding and copy the headers into `payroll_export.template_headers`; set `payroll_ref` per person | Phase 1 |
 | Q-15 | Are teachers employees or contractors in Gusto? Are any desk staff contractors? | Set `payroll_type` per person at onboarding | Phase 1 |
 | Q-16 | Do teaching and desk work have different pay rates in Gusto, and how does the employee template take hours per rate or job? | If yes, `split_by_kind: true`, with one row per kind mapped to the Gusto job; confirm against the template | Phase 1 |
+| Q-17 | *(Resolved: yes, 2 seats; D-45.)* | — | — |
+| Q-18 | *(Resolved: no refund for a late-cancelled drop-in, even if refilled; D-48.)* | — | — |
+| Q-19 | *(Resolved: Kairos notifies members itself, D-51.)* | — | — |
+| Q-21 | Can BookingVendor's member notifications be switched off individually, keeping only its payment receipts (D-51, A-17)? | Check in BookingVendor's admin before go-live | Phase 1 |
+| Q-20 | *(Resolved: a cancel at exactly 2 h before start is not pay-protected; D-55.)* | — | — |
 
 ## 17.2 Risks
 
@@ -35,3 +40,5 @@
 | R-08 | Agents mis-explain policy | M | M | Policy text rendered from config; H2 checker; confirmations |
 | R-09 | Rollback fails after a long time in owner mode | M | H | Continuous push with verification; rehearsals; retire only after 60 days |
 | R-10 | Small team working mostly through coding agents | H | M | Typed contracts, fixtures, scenario DSL, property tests, assert lint |
+| R-11 | A Phase 3 class cancel push fails and members arrive to a cancelled class | L | H | Push retries within 10 min, then an urgent task and a non-rate-limited staff page (§3A.9.4) |
+| R-12 | §3A grows out of step with the mechanisms in §7–§12 | M | M | One test file per lifecycle card (§14.1); a card change requires its test change in the same PR |

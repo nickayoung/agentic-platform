@@ -12,7 +12,7 @@ owner message
   2. Drafting         propose_patch: ops tagged with fact ids; L1–L3 checks returned at once (≤ 3 repairs per issue)
   3. Validation       validate: L1–L5
   4. Simulation       simulate: base vs draft on the same seeded demand
-  5. Impact           impact: migration plan; every impact group needs a resolution
+  5. Impact           impact: migration plan; every impact group needs a resolution (L6)
   6. Summary          explain_diff (deterministic) + agent summary, checked mechanically
   7. Approval         owner/admin approves, bound to the draft's content hash
   8. Publish          stage → activate → post-activation ops (§6.8)
@@ -56,6 +56,8 @@ submit_for_approval({ draft_id; summary_md; acknowledged_warnings }): { state } 
 
 Errors block publish. Warnings must be acknowledged when the draft is submitted.
 
+Layers: **L1** schema, **L2** references, **L3** expressions, **L4** semantic rules, **L5** solver feasibility probe, **L6** impact plan.
+
 | Layer | Code | Sev. | Rule |
 |---|---|---|---|
 | L1 | `SCHEMA_INVALID` | E | Zod parse fails |
@@ -80,7 +82,7 @@ Errors block publish. Warnings must be acknowledged when the draft is submitted.
 | L4 | `SERIES_OUTSIDE_HOURS` | E | An occurrence, including its room and teacher buffers, falls outside studio or room hours |
 | L4 | `UNSATISFIABLE_SELECTOR` | E/W | No room matches (error); no current person matches (warning) |
 | L4 | `PAYMENT_IMPOSSIBLE` | E | `units_only`, but no product grants the unit and covers the template |
-| L4 | `COVERAGE_UNCOVERABLE` | E | Some coverage interval on some day cannot be covered by the shift candidates for that day and studio. Candidates must fit inside desk availability (§4.6) |
+| L4 | `COVERAGE_UNCOVERABLE` | E | Some coverage interval on some day cannot be covered by the shift candidates for that day and studio. Candidates must fit inside desk availability, and at no grain may the chosen candidates need more lanes than the desk's `concurrency` (§4.6). Checked per studio and day by an exact interval-cover search over that day's candidates (≤ 30 candidates per studio-day in practice) |
 | L4 | `HARD_CONTRADICTION` | E | Contradictory hard rules, e.g. `max_hours/day` < the shortest shift for a role |
 | L4 | `WAITLIST_SCHEDULE_UNORDERED` | E | Waitlist schedule offsets are not strictly decreasing |
 | L4 | `UNSTAFFED_NOT_AFTER_DEADLINE` | W | `unstaffed.check_at` is at or before the `sub_finder` workflow's deadline, so a substitute found just before the deadline cannot be approved in time. The check must be at least 15 min after the deadline |
@@ -89,12 +91,14 @@ Errors block publish. Warnings must be acknowledged when the draft is submitted.
 | L4 | `PAYROLL_HEADER_UNKNOWN` | E | A `payroll_export.columns` header is missing from `template_headers` |
 | L4 | `PAYROLL_JOB_COLUMN_MISSING` | E | `split_by_kind` is set without a job column and `job_names` |
 | L4 | `PAYROLL_OT_BELOW_ROSTER_CAP` | W | `overtime.weekly_hours` is below the highest `max_hours/week` rule, so rosters can legally produce overtime |
-| L4 | `WAITLIST_SILENT` | W | `offer_all` mode with no workflow on `waitlist.offered`, or no workflow on `waitlist.skipped` |
+| L4 | `NOTICE_MISSING` | W | A *required notice* event (§9.2), applicable to this config, has no enabled workflow with a `notify` action. Replaces v2.1's `WAITLIST_SILENT`; `waitlist.offered` and `waitlist.skipped` are in the list |
+| L4 | `SCOPE_ALL_MEMBER_RECIPIENT` | W | With `member_messaging: record_holder`, a workflow with `scope: all` has a member recipient, so it may message members about records an outside system owns (§9.3) |
+| L4 | `MIN_REST_SCOPE_UNKNOWN_TAG` | E | A `min_rest.from`/`to` tag is not a tag of any template |
 | L4 | `KIND_MISMATCH` | W | `kind: shift` with customers, or `kind: class` with `participants: none` |
 | L4 | `DST_SHIFTED_OCCURRENCE` | I | An occurrence falls on a non-existent local time (§7.10) |
 | L5 | `INFEASIBLE_HARD_CONSTRAINTS` | E | The solver probe proves the hard rules can't all hold. The minimal conflicting set is reported (§8.4) |
 | L5 | `FEASIBILITY_UNKNOWN` | W | The probe timed out after 20 s |
-| L7 | `IMPACT_UNRESOLVED` | E | An impact group has no resolution |
+| L6 | `IMPACT_UNRESOLVED` | E | An impact group has no resolution |
 
 **L5 probe.** Takes the next two weeks of classes (teacher slots) and desk coverage, with current people, availability, time off and all mirrored claims. Only hard rules are checked, each wrapped in an assumption literal. Example report:
 
@@ -171,7 +175,7 @@ Principle: a confirmed booking never changes silently.
 | Product changed | Existing entitlements keep their `product_hash` until renewal | Apply now (only if more lenient) |
 | Workflow changed or removed | Pending actions of removed workflows are cancelled; changed workflows are re-planned idempotently (§9.5) | — |
 | Limit max lowered | `max = max(new, current count)`; existing bookings kept | — |
-| Studio closed or room removed | §3.12.2 / §3.12.3 | — |
+| Studio closed or room removed | §3A.4 / §3A.5 | — |
 | Template removed (series or one-off sessions still in the future) | **No default.** One impact group per future session | (a) keep until it has run; (b) cancel, refund, notify |
 
 **Publish:**
@@ -185,5 +189,5 @@ Principle: a confirmed booking never changes silently.
 ## 6.9 Rollback
 
 - Rollback publishes version *k*'s document as version *n+1*, with `rollback_of = k`. Impact is computed from *n* to *k*. Bookings made under *n* keep their own terms.
-- **Emergency rollback** (owner or admin) skips simulation but still runs L1–L4 and impact, taking the safest defaults. Target: under 60 s.
+- **Emergency rollback** (owner or admin) skips simulation but still runs L1–L4 and L6 (impact), taking the safest defaults. Target: under 60 s.
 - Domain-mode rollback is a separate procedure (§18.7).

@@ -36,13 +36,16 @@ cases:
       golden_threshold: 0.9
       golden_ignore: ["$.access", "$.simulation", "$.timetable", "$.workflows", "$.custom_fields", "$.forms", "$.views",
                       "$.availability[?(@.key=='holidays')]", "$.tenant.fee_ceiling", "$.tenant.environment_guards",
-                      "$.tenant.refund_credit_product", "$.entitlement_products[?(@.key=='refund_credit')]"]
+                      "$.tenant.refund_credit_product", "$.entitlement_products[?(@.key=='refund_credit')]",
+                      "$.resources[?(@.key=='db_desk')].concurrency"]     # not stated in the Y-REF-01 prompt; the tenant confirmed 2 (D-45)
       structural:
         - { path: "$.layouts[?(@.key=='mats_30')].generate.per_row", equals: 6 }
         - { path: "$.templates[?(@.key=='hot_75')].requirements[?(@.key=='teacher')].select.skills_all", contains: hot_cert }
         - { path: "$.policies[*].cancellation.free_until.before_start", equals: "12h" }
         - { path: "$.policies[*].cancellation.late.waive_if", equals: "booking.place_refilled" }
         - { path: "$.policies[*].unstaffed.check_at.before_start", equals: "90m" }
+        - { path: "$.constraints[?(@.rule.duration=='10h')].rule.from.template_tags", contains: closing }
+        - { path: "$.constraints[?(@.rule.duration=='10h')].rule.to.template_tags", contains: opening }
         - { path: "$.roles[*].key", not_contains: instructor }
       scenarios: [fixtures/scenarios/lotus_line/*.yaml]
       not_expressible: []

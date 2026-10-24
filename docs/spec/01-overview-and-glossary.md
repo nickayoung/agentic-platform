@@ -55,7 +55,7 @@ Two further components work on top of the engines:
 - check-in, desk tasks, workflows and runtime agents;
 - sync with outside systems;
 - hours export;
-- the full lifecycle of tenants, studios, rooms, staff and members (§3.12).
+- the full lifecycle of every entity, in one place (§3A).
 
 **Out of scope for v2.0 (D-25):**
 - business shapes other than yoga studios (appointments, gyms, restaurants, field service, space rental);
@@ -89,11 +89,13 @@ Two further components work on top of the engines:
 | **Grain** | 5 minutes of UTC time: `floor(epoch_minutes / 5)`. |
 | **Place** | One unit of member capacity in a class. An assigned place is a mat spot. A pooled place is anonymous. |
 | **Place claim** | The one row that holds a place: either a hold or a booking. This is a different table from resource claims. |
+| **`release_place`** | The one routine every place-freeing path runs in its batch: it frees the place, reserves it for the waitlist when an eligible waiting entry exists, and emits `place.released` (§7.7). |
 | **Partition** | A labelled subset of places with its own eligibility and release time, for example `front_row_unlimited` or `walk_in`. |
 | **Hold** | A claim on a place that expires after a short time, used during checkout. |
-| **Booking** | A member's confirmed claim on a place. |
+| **Booking** | A member's claim on a place in a class, from confirmation (or `pending_approval`) until it ends (§3.8.1). `booked_via` records the channel it was made through. |
+| **Channel** | Where a request comes from: `web`, `desk`, `portal`, `agent`, `mirror` or `waitlist` (CEL `request.channel`; stored on a booking as `booked_via`). |
 | **Waitlist entry** | A member's ordered request for a place in a full class. |
-| **Offer** | A time-limited request to a person, either a waitlisted member (a place offer) or an instructor (a substitute offer). |
+| **Offer** | A time-limited request to a person, either a waitlisted member (a place offer) or an instructor (a substitute offer). A substitute offer that was accepted but whose proposal then failed, was rejected or expired is **lapsed**. |
 | **Policy set** | A named bundle of booking window, cancellation, no-show, limits, approval, minimum attendance, unstaffed handling, waitlist, refund and check-in rules. |
 | **Entitlement product** | A membership or class pack that a member can hold. It grants **units** and may carry caps and a tier. |
 | **Entitlement** | One member's instance of a product, with a balance and validity. Every change is recorded in the **ledger**. |
@@ -101,12 +103,28 @@ Two further components work on top of the engines:
 | **Tier** | A ranked membership level (`member`, `unlimited`). |
 | **Constraint** | A hard rule (never broken) or a soft rule (weighted preference) used by the engines. |
 | **Coverage requirement** | The minimum and target desk staffing per studio and time of day. |
-| **Workflow** | Trigger → condition → actions. Actions can be delayed. |
-| **Proposal** | A change that is validated and then approved by a human. Persons, the solver or agents can create one. Examples: a substitute, a roster, a refund. |
+| **Hours record** | One assignment's scheduled and worked time, used for the payroll export; exists only for owned domains (§3A.16). |
+| **Workflow** | Trigger → condition → actions. Actions can be delayed. A **workflow run** is one execution for one event or time anchor. |
+| **Workflow scope** | `all`: a workflow also runs for events about records mirrored from an outside system. `owned`: only for events whose domain Kairos owns. The default comes from `tenant.member_messaging` (`kairos` → `all`; `record_holder` → `owned`, with member recipients resolving only for owned bookings or members) (§9.3). |
+| **Event domain** | The data domain an event belongs to (`classes`, `bookings`, `members`, `shifts`, or `none`), carried as `event.domain` (§9.2). |
+| **Required notice** | An event that a config must route to a `notify` workflow, or validation warns `NOTICE_MISSING` (§9.2). |
+| **Outbox** | The table of side effects (messages, pushes, money jobs) written in the same batch as the state change and delivered after commit with retries (§12.6). |
+| **Saga** | Work larger than one batch, done as numbered idempotent steps that resume after a failure (§3A.1 C6). |
+| **Lifecycle card** | The fixed description of one lifecycle event: trigger, state changes, dependants, notifications, outside systems per mode, audit, failure and recovery (§3A.1). |
+| **Proposal** | A change that is validated and then approved by a human. Staff, the solver, agents or the engine (on a substitute accept) can create one. Examples: a substitute, a roster, a refund. |
+| **Impact plan** | The list of existing records a change affects, grouped, each group with a resolution: for a config change (§6.8, L6) or a session edit (§3A.9.2). |
+| **Studio cancel** | Kairos cancels a session (unstaffed, under minimum, closure, staff, migration, tenant closing). Booking effects follow §3A.9.4. |
+| **Unstaffed check** | The built-in timer at `unstaffed.check_at` that cancels a class (or notifies staff) when a roster requirement is still empty (§3A.9.5). |
+| **Over capacity** | A session with more bookings than places after a capacity cut; it takes no new bookings (§3A.9.3). |
 | **Decision trace** | The ordered checks the engine ran for a request, with their reason codes. |
 | **Config document / version / draft** | The tenant's full configuration (§4); a published, content-hashed copy of it; an unpublished working copy. |
 | **Domain** | A unit of data ownership for sync: `classes`, `bookings`, `members`, `shifts`. |
-| **Domain mode** | `mirror`, `shadow` or `owner`, set per domain (§18.5). |
+| **Domain mode** | `mirror`, `shadow` or `owner`, set per domain (§18.5). What Kairos does in each mode is the matrix in §3A.2. |
+| **Dry run** | In `shadow` mode, Kairos computes the decision it would make, logs any difference from the outside system as a shadow disagreement, and writes nothing else. |
+| **Write freeze** | A short period (≤ 15 min) during a mode switch when writes to the domain return `WRITE_FROZEN` (§18.7). |
+| **Push** | An outbox call that sends a change Kairos owns to an outside system through the gateway. A push that fails 3 times raises `push_failed` drift. |
+| **Adoption** | At the classes cutover, matching mirrored future sessions to timetable series so they become Kairos sessions (§3A.18). |
+| **Staleness guard** | A targeted pull of a person's mirrored days before a staff commit; fails with `MIRROR_STALE` when the outside system is unreachable and the copy is too old (§18.6). |
 | **Person mapping** | The link from an outside system's person ID (for example a BookingVendor instructor) to a Kairos person resource (§18.5). |
 | **Drift** | A difference between Kairos's copy of a record and the outside system's record. |
 | **Gateway** | The tenant's shared proxy for every outbound call. It holds all outside credentials. |

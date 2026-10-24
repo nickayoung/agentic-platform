@@ -1,4 +1,4 @@
-scenario: A.4 instructor sick call, no substitute, class cancelled and refunded
+scenario: A.4 instructor sick call, no substitute, class cancelled and refunded (owner mode; Phase 3 variants below)
 config: fixtures/configs/lotus_line.yaml
 domain_modes: { classes: owner, bookings: owner, members: owner, shifts: owner }
 clock: "2027-03-09T12:00:00-05:00"
@@ -38,19 +38,58 @@ variants:
       - outbox: { topic: notify, message: substitute_teacher, recipients: 20 }
   - name: accepted late, pending at check time, approved before deferred deadline
     steps:
+      - at: "2027-03-09T15:50:00-05:00"
+        send_offer: { by: manager, person: ravi, requirement: teacher }      # expires min(16:00, hook deadline 16:00)
       - at: "2027-03-09T15:58:00-05:00"
         accept_offer: { person: ravi }
       - at: "2027-03-09T16:45:00-05:00"
         approve_proposal: { by: manager }
     then:
+      - proposal: { person: ravi, expires_at: "2027-03-09T17:30:00-05:00" }
+      - event: { name: proposal.urgent }
       - session: { ref: ps_hot_1800@2027-03-09, status: scheduled }
   - name: substitute became busy before approval
+    given_override: { people: [{ id: ana, roles: [teacher, desk_staff], skills: [ryt200, hot_cert] }] }   # Ana can work the desk
     steps:
       - at: "2027-03-09T12:04:00-05:00"
         accept_offer: { person: ana }
       - at: "2027-03-09T12:06:00-05:00"
-        assign: { person: ana, session: { template: desk_mid, location: park_slope, start: "16:00" } }
+        assign: { person: ana, session: { template: desk_mid, location: park_slope, start: "16:00" }, expect: 201 }   # 16:00–20:00 overlaps the class
       - at: "2027-03-09T12:15:00-05:00"
         approve_proposal: { by: manager, expect: RESOURCE_CONFLICT }
     then:
       - proposal: { state: failed }
+      - offer: { person: ana, state: lapsed, end_reason: proposal_failed }
+  - name: two substitutes accept at once
+    steps:
+      - concurrent:
+          - accept_offer: { person: ana, as: acc_a }
+          - accept_offer: { person: leo, as: acc_l }
+    then:
+      - exactly_one_of:
+          - { result: acc_a, status: 201 }
+          - { result: acc_l, status: 201 }
+      - other_result: { status: 409, code: OFFER_FILLED }
+      - proposal: { count: 1, state: pending }
+      - offers: { session: ps_hot_1800@2027-03-09, kind: substitute, state: accepted, count: 1 }
+  - name: Phase 3 — classes owned, bookings in shadow; BookingVendor cancels and refunds
+    domain_modes: { classes: owner, bookings: shadow, members: mirror, shifts: owner }
+    steps:
+      - advance_to: "2027-03-09T16:30:00-05:00"
+      - mirror_event: { system: booking_vendor, type: bookings.cancelled, class: BV-HOT-0309, count: 20 }
+    then:
+      - session: { ref: ps_hot_1800@2027-03-09, status: cancelled, reason: no_staff }
+      - outbox: { topic: gateway.booking_vendor.classes.cancel, count: 1 }
+      - ledger: { kind: release, count: 0 }
+      - outbox: { none_matching: "gateway.payments.*" }
+      - outbox: { topic: notify, message: class_cancelled, recipients: 20 }   # Kairos texts members even though BookingVendor holds the bookings (D-51)
+      - bookings: { session: ps_hot_1800@2027-03-09, state: cancelled, source: mirror, count: 20 }
+  - name: Phase 3 — the cancel push fails
+    domain_modes: { classes: owner, bookings: shadow, members: mirror, shifts: owner }
+    outside: { booking_vendor: unavailable }
+    steps:
+      - advance_to: "2027-03-09T16:40:00-05:00"
+    then:
+      - session: { ref: ps_hot_1800@2027-03-09, status: cancelled }
+      - drift: { kind: push_failed }
+      - outbox: { topic: notify, message: cross_domain_conflict }

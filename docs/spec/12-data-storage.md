@@ -124,10 +124,17 @@ CREATE INDEX place_claim_customer ON place_claim(customer_id);
 CREATE INDEX place_claim_expiry ON place_claim(expires_at) WHERE kind = 'hold';
 CREATE TABLE offer (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('place','substitute')), session_id TEXT NOT NULL,
   waitlist_entry_id TEXT, requirement_key TEXT, customer_id TEXT, resource_id TEXT, state TEXT NOT NULL,
-  expires_at INTEGER NOT NULL, reply_text TEXT, hold_id TEXT, created_by TEXT NOT NULL, run_id TEXT,
-  CHECK ((customer_id IS NULL) != (resource_id IS NULL)));
+  expires_at INTEGER NOT NULL, reply_text TEXT, hold_id TEXT, proposal_id TEXT, end_reason TEXT,
+  created_by TEXT NOT NULL, run_id TEXT,
+  CHECK (state IN ('sent','accepted','declined','expired','withdrawn','lapsed')),
+  CHECK ((customer_id IS NULL) != (resource_id IS NULL)));   -- Offer.recipient (§3.8)
 CREATE INDEX offer_open ON offer(session_id, state, expires_at);
-CREATE UNIQUE INDEX offer_one_open_substitute ON offer(session_id, requirement_key, resource_id) WHERE state = 'sent';
+CREATE UNIQUE INDEX offer_one_open_substitute ON offer(session_id, requirement_key, resource_id)
+  WHERE kind = 'substitute' AND state = 'sent';
+CREATE UNIQUE INDEX offer_one_accepted_substitute ON offer(session_id, requirement_key)
+  WHERE kind = 'substitute' AND state = 'accepted';                 -- ← one live acceptance per slot (D-57)
+CREATE UNIQUE INDEX offer_one_open_place ON offer(waitlist_entry_id)
+  WHERE kind = 'place' AND state IN ('sent','accepted');
 ```
 
 **Hold expiry.** The SessionGate alarm releases each hold when it expires. A sweep also runs every minute. It finds expired holds with:
@@ -137,6 +144,8 @@ SELECT session_id, place_id, holder_id FROM place_claim WHERE kind = 'hold' AND 
 ```
 
 and releases them **one session per batch** through `release_place` (§7.7). Each batch deletes the place claim (guarded on holder and expiry), marks the hold `expired`, sets `reserved_for` if the waitlist has waiting entries, and emits `place.released`.
+
+**Substitute accept.** The accept batch updates the offer to `accepted` (the partial unique index rejects a second acceptance for the slot), inserts the proposal, and withdraws the other open offers. A proposal that fails, is rejected or expires sets its offer to `lapsed` in the same batch, which frees the index for the next acceptance (§3A.14).
 
 A second sweep runs promotion for places whose `reserved_for` was set more than 30 s ago. The sweep may never free places with a bare `DELETE`, because that would bypass waitlist priority. Holds claim only places, never occupancy (there are no on-demand bookings in v2.0), so an expired hold can never block a teacher or a room.
 
@@ -173,6 +182,8 @@ CREATE INDEX ledger_ent ON ledger(entitlement_id, at);
 - `lim:<policy>:<limit>:<customer>:<window_start_local_date>`, or `…:upcoming` for the upcoming window
 - `cap:<entitlement>:<cap>:<window_start>`
 
+**Counter lifecycle.** A counter is incremented in the batch that confirms (or puts into `pending_approval`) a counted booking. It is decremented in the batch that moves that booking to `cancelled`, `late_cancelled` or `rejected`. An `upcoming` counter is also decremented at session start, by the start timer (§3A.9.6), so it counts only classes that haven't started. Day, week and month counters are never decremented by time; they expire at `window_end`.
+
 **Nightly reconciliation.** Every counter and every balance is recomputed from bookings and the ledger. Any mismatch is corrected and raises an alert.
 
 ## 12.6 Events, workflows, outbox, audit
@@ -198,7 +209,17 @@ CREATE TABLE audit (seq INTEGER PRIMARY KEY, id TEXT UNIQUE, at INTEGER, actor T
 
 ## 12.7 Other core tables
 
-`resource`, `resource_skill`, `resource_role`, `availability_record`, `time_off`, `customer` (encrypted PII columns, blind indexes), `customer_history`, `session` (`UNIQUE(occurrence_key)`, `(location_key, start_at)`, `(status, start_at)`), `assignment` (`(resource_id, session_id)`, `(session_id, requirement_key)`), `hold`, `waitlist_entry` (`UNIQUE(session_id, position)`, plus a partial unique `(session_id, customer_id) WHERE state IN ('waiting','offered')`), `check_in` (`UNIQUE(client_key)`), `entitlement`, `proposal`, `swap_request`, `task`, `hours_record`, `resource_block`, `decision`, `config_version`, `config_draft`, `domain_mode`, `flag`, `external_ref`, `person_mapping` (`PRIMARY KEY(system, external_person_id)`), `agent_client`, `idempotency`.
+`resource`, `resource_skill`, `resource_role`, `availability_record`, `time_off`, `customer` (encrypted PII columns, blind indexes), `customer_history`, `session` (`UNIQUE(occurrence_key)`, `(location_key, start_at)`, `(status, start_at)`; columns `cancel_reason`, `over_capacity`), `assignment` (`(resource_id, session_id)`, `(session_id, requirement_key)`), `hold`, `waitlist_entry` (`UNIQUE(session_id, position)`, plus a partial unique `(session_id, customer_id) WHERE state IN ('waiting','offered')`; column `end_reason`), `check_in` (`UNIQUE(client_key)`), `entitlement`, `proposal`, `swap_request`, `task`, `hours_record` (partial unique `(assignment_id) WHERE state != 'voided'`, I-28b; columns `void_reason`, `pay_protected`, `final`), `resource_block`, `decision`, `config_version`, `config_draft`, `domain_mode`, `flag`, `external_ref`, `person_mapping` (`PRIMARY KEY(system, external_person_id)`), `agent_client`, `idempotency`.
+
+```sql
+CREATE TABLE saga (id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT, step INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK (state IN ('running','done','parked','compensating','failed')),
+  lease_until INTEGER, attempts INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1, last_batch TEXT, created_at INTEGER NOT NULL);
+CREATE INDEX saga_due ON saga(state, lease_until);
+```
+
+Each saga step's batch advances `saga.step` with a version guard, so a step can't run twice (§3A.1 C6). Kinds: `closure`, `session_cancel_bookings`, `session_edit`, `roster_commit`, `customer_merge`, `customer_close`, `tenant_close`, `offboard`, `config_post_activation`, `domain_switch`.
 
 ## 12.8 Concurrency control summary
 
@@ -215,6 +236,8 @@ CREATE TABLE audit (seq INTEGER PRIMARY KEY, id TEXT UNIQUE, at INTEGER, actor T
 | Booking-rush fairness | SessionGate |
 | Lost hold expiry | upsert over expired row + alarm + 1-minute sweep |
 | Duplicate side effects | `UNIQUE` idempotency keys (runs, actions, outbox, ledger, check-ins, inbound events) |
+| Two substitutes accepted for one slot | partial unique index `offer_one_accepted_substitute` |
+| A saga step applied twice | `saga.step` version guard |
 | Stale config | `config_epoch` read on every request |
 
 ## 12.9 Volume, retention, migrations, backups
