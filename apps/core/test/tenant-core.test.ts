@@ -1,5 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { KairosError } from '@kairos/errors';
+import { coreMigrations } from '@kairos/db';
 import { enqueue, RETRY_DELAYS_MS } from '@kairos/scheduler';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CallContext, Scope } from '../src/index';
@@ -23,7 +24,7 @@ describe('TenantCore', () => {
       ['bookings', 'mirror'], ['classes', 'mirror'], ['members', 'mirror'], ['shifts', 'mirror'],
     ]);
     const h = await stub.health(scope);
-    expect(h.migrations).toEqual(['0001_core']);
+    expect(h.migrations).toEqual(coreMigrations.map((m) => m.id));
     expect(h.alarm).not.toBeNull();
     await stub.init(ctxOf(scope));   // idempotent
     expect((await stub.getDomainModes(scope)).length).toBe(4);

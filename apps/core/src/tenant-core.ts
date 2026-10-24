@@ -13,8 +13,14 @@ import {
   type ConfigVersionSummary, type Draft, type JsonObject,
 } from './config';
 import type { ConfigDocument, JsonPatchOp } from '@kairos/config-schema';
+import { approveHours, gustoEmployeesCsv, listHours, markWorked, type ExportResult, type HoursRow } from './hours';
 import { nextMaintenanceSlot, runMaintenance, type MaintenanceReport } from './maintenance';
+import { applyMirrorClass, listClasses, type ClassRow, type MirrorClass, type MirrorResult } from './mirror';
+import { activeConfig } from './model';
+import { syncPeople, toPerson, type DirectoryPerson, type PersonRow } from './resources';
 import { objectName, ScopeGuard, type Scope } from './scope';
+import { assignShift, rosterWeek, unassignShift, vacateForTimeOff, type AssignInput, type CoverageGap, type Slot } from './shifts';
+import { weekStartOf } from './time';
 
 export interface CoreEnv extends DeliveryEnv {
   ARCHIVE?: R2Bucket;   // locked audit/decision archive (§19.7)
@@ -356,6 +362,141 @@ export class TenantCore extends DurableObject<CoreEnv> {
       if (!r) return null;
       const epoch = Number(tx.maybe<{ value: string }>(`SELECT value FROM scheduler_state WHERE key = 'config_epoch'`)?.value ?? 0);
       return { number: r.number, content_hash: r.content_hash, epoch, document: JSON.parse(r.document) as JsonObject };
+    });
+  }
+
+  // ---- studios and people (§3.4, §18.3) --------------------------------------------------------------------------
+
+  async me(scope: Scope, subject: string): Promise<PersonRow | null> {
+    this.enter(scope);
+    return this.db.tx((tx) => {
+      const r = tx.maybe<Record<string, SqlStorageValue>>(`SELECT * FROM resource WHERE kind = 'person' AND staff_key = ?`, subject);
+      return r ? toPerson(r) : null;
+    });
+  }
+
+  async listLocations(scope: Scope): Promise<{ key: string; name: string; timezone: string }[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => activeConfig(tx).doc.locations.map((l) => ({ key: l.key, name: l.name, timezone: l.timezone })));
+  }
+
+  async listPeople(scope: Scope, filter: { role?: string; location?: string }): Promise<PersonRow[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => tx.all<Record<string, SqlStorageValue>>(`SELECT * FROM resource WHERE kind = 'person' ORDER BY name`)
+      .map(toPerson)
+      .filter((p) => (!filter.role || p.roles.includes(filter.role)) && (!filter.location || p.location_keys.includes(filter.location))));
+  }
+
+  /** Directory import (§18.3 `person.created` / nightly sync): people, staff roles from the config's mappings. */
+  async syncDirectory(c: CallContext, people: DirectoryPerson[]): Promise<{ created: number; updated: number }> {
+    return this.mutate(c, (tx, now) => {
+      const r = syncPeople(tx, activeConfig(tx).doc, people, now);
+      return { result: r, audit: { action: 'directory.synced', target: { type: 'directory', id: 'staff' }, before: null, after: { ...r, people: people.length } } };
+    });
+  }
+
+  // ---- desk shifts (owner mode, §8, §3A.10–§3A.11) ------------------------------------------------------------------
+
+  async rosterWeek(scope: Scope, location: string, date: string): Promise<{ week_start: string; location: string; slots: Slot[]; coverage: CoverageGap[] }> {
+    this.enter(scope);
+    return this.db.tx((tx) => {
+      const cfg = activeConfig(tx);
+      if (!cfg.doc.locations.some((l) => l.key === location)) throw new KairosError('NOT_FOUND', { message: `studio ${location}` });
+      const week = weekStartOf(date, cfg.doc.tenant.week_starts as never);
+      return { week_start: week, location, ...rosterWeek(tx, cfg, location, week) };
+    });
+  }
+
+  async assignShift(c: CallContext, input: AssignInput): Promise<Slot> {
+    return this.mutate(c, (tx, now) => {
+      const r = assignShift(tx, activeConfig(tx), input, c.actor, now);
+      return { result: r.slot, audit: { action: 'assignment.confirmed', target: { type: 'session', id: r.session_id }, before: null, after: input } };
+    });
+  }
+
+  async unassignShift(c: CallContext, sessionId: string): Promise<{ ok: true }> {
+    return this.mutate(c, (tx, now) => {
+      unassignShift(tx, sessionId, now);
+      return { result: { ok: true as const }, audit: { action: 'session.cancelled', target: { type: 'session', id: sessionId }, before: null, after: { reason: 'removed' } } };
+    });
+  }
+
+  /**
+   * Time off (§3A.11). A sick call (`immediate`) is recorded approved and vacates the person's overlapping owned
+   * shifts; other time off is recorded approved when a manager enters it (requests from staff come in a later phase).
+   */
+  async recordTimeOff(
+    c: CallContext, input: { resource_id: string; start: number; end: number; reason: 'sick' | 'vacation' | 'personal'; immediate?: boolean },
+  ): Promise<{ id: string; state: string; vacated: { session_id: string; template_key: string; start: number }[] }> {
+    if (!(input.start < input.end)) throw new KairosError('SCHEMA_INVALID', { message: 'start must be before end' });
+    return this.mutate(c, (tx, now) => {
+      const cfg = activeConfig(tx);
+      const person = tx.maybe('SELECT id FROM resource WHERE id = ? AND kind = ?', input.resource_id, 'person');
+      if (!person) throw new KairosError('NOT_FOUND', { message: `person ${input.resource_id}` });
+      const tid = `tof_${crypto.randomUUID().replaceAll('-', '')}`;
+      tx.run(`INSERT INTO time_off (id, resource_id, start_at, end_at, reason, immediate, state, created_by, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`,
+        tid, input.resource_id, input.start, input.end, input.reason, input.immediate ? 1 : 0, JSON.stringify(c.actor), now, now);
+      const vacated = input.immediate ? vacateForTimeOff(tx, cfg, input.resource_id, input.start, input.end, now) : [];
+      return {
+        result: { id: tid, state: 'approved', vacated },
+        audit: { action: 'time_off.recorded', target: { type: 'time_off', id: tid }, before: null, after: { ...input, vacated: vacated.length } },
+        events: [{ name: 'timeoff.submitted', subject: { type: 'time_off', id: tid }, data: { immediate: !!input.immediate, resource_id: input.resource_id } }],
+      };
+    });
+  }
+
+  async listTimeOff(scope: Scope, from: number, to: number): Promise<{ id: string; resource_id: string; name: string; start: number; end: number; reason: string; state: string }[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => tx.all(
+      `SELECT t.id, t.resource_id, r.name, t.start_at AS start, t.end_at AS "end", t.reason, t.state
+         FROM time_off t JOIN resource r ON r.id = t.resource_id WHERE t.end_at > ? AND t.start_at < ? ORDER BY t.start_at`, from, to));
+  }
+
+  // ---- mirrored classes (§12.1, §18.5) --------------------------------------------------------------------------------
+
+  /** Called by TenantSync with changed BookingVendor classes; one batch per class (§19.2). */
+  async mirrorApply(scope: Scope, classes: MirrorClass[]): Promise<MirrorResult> {
+    const out: MirrorResult = { applied: 0, unchanged: 0, conflicts: [], unmapped: [] };
+    const c: CallContext = { scope, actor: { type: 'system', component: 'sync' }, requestId: `sync_${Date.now()}` };
+    for (const m of classes) {
+      const before = out.applied;
+      await this.mutate(c, (tx, now) => {
+        applyMirrorClass(tx, activeConfig(tx), m, now, out);
+        return { result: null, audit: { action: out.applied > before ? 'session.mirrored' : 'session.mirror_unchanged', target: { type: 'external', id: m.external_id }, before: null, after: { status: m.status } } };
+      });
+    }
+    return out;
+  }
+
+  async listClasses(scope: Scope, from: number, to: number, location: string | null): Promise<ClassRow[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => listClasses(tx, activeConfig(tx), from, to, location));
+  }
+
+  // ---- hours and payroll export (§18.8) -----------------------------------------------------------------------------
+
+  async listHours(scope: Scope, from: number, to: number): Promise<HoursRow[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => {
+      markWorked(tx, Date.now());
+      return listHours(tx, from, to);
+    });
+  }
+
+  async approveHours(c: CallContext, id: string): Promise<HoursRow> {
+    return this.mutate(c, (tx, now) => {
+      markWorked(tx, now);
+      const h = approveHours(tx, id, c.actor, now);
+      return { result: h, audit: { action: 'hours.approved', target: { type: 'hours_record', id }, before: null, after: { minutes: h.minutes } } };
+    });
+  }
+
+  async exportHours(c: CallContext, periodStart: string): Promise<ExportResult> {
+    return this.mutate(c, (tx, now) => {
+      markWorked(tx, now);
+      const r = gustoEmployeesCsv(tx, activeConfig(tx), periodStart, c.scope.env, c.scope.tenant);
+      return { result: r, audit: { action: 'hours.exported', target: { type: 'export', id: r.filename }, before: null, after: { rows: r.rows, unapproved: r.unapproved } } };
     });
   }
 

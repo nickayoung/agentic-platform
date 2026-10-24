@@ -8,6 +8,7 @@ import {
 import { canonicalJson, type Tx } from '@kairos/db';
 import { KairosError } from '@kairos/errors';
 import type { TickSource } from '@kairos/scheduler';
+import { materializeStructural } from './resources';
 import type { Db } from '@kairos/db';
 
 export type DraftState = 'editing' | 'validated' | 'awaiting_approval' | 'published' | 'abandoned';
@@ -116,7 +117,10 @@ export function insertVersion(
     `cfv_${crypto.randomUUID().replaceAll('-', '')}`, number, compiled.content_hash, canonicalJson(a.document), canonicalJson(compiled),
     active, a.now, canonicalJson(a.actor), a.effectiveFrom, a.summary, a.rollbackOf, immediate ? 'active' : 'staged',
   );
-  if (immediate) bumpEpoch(tx);
+  if (immediate) {
+    bumpEpoch(tx);
+    materializeStructural(tx, compiled.document, a.now);
+  }
   return {
     number, content_hash: compiled.content_hash, state: immediate ? 'active' : 'staged', effective_from: a.effectiveFrom,
     published_at: a.now, summary: a.summary, rollback_of: a.rollbackOf, parent_number: active,
@@ -143,6 +147,8 @@ export function activationSource(db: Db, onActivate: (tx: Tx, number: number, no
         tx.run(`UPDATE config_version SET state = 'superseded' WHERE state = 'active'`);
         tx.run(`UPDATE config_version SET state = 'active' WHERE number = ?`, due.number);
         bumpEpoch(tx);
+        const compiled = JSON.parse(tx.one<{ compiled: string }>('SELECT compiled FROM config_version WHERE number = ?', due.number).compiled) as { document: ConfigDocument };
+        materializeStructural(tx, compiled.document, now);
         onActivate(tx, due.number, now);
         return 1;
       });
