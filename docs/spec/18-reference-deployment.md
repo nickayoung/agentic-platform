@@ -6,13 +6,13 @@
 |---|---|
 | Studios | Park Slope (Studio 1: 30 mats; Studio 2, heated: 24 mats), Williamsburg (36 mats), Dumbo (28 places, no mat map). All in `America/New_York` |
 | People | About 40 teachers and about 25 desk staff. Some do both |
-| Outside systems | **BookingVendor** is the record for classes, bookings, members, memberships and payments. **ShiftTool** holds desk shifts. **PayrollCo** pays staff |
+| Outside systems | **BookingVendor** is the record for classes, bookings, members, memberships and payments. **ShiftTool** holds desk shifts. **Gusto** pays staff. Kairos hands it hours as a CSV file that a manager uploads (§18.8) |
 | Front ends | Public website; desk operations app (web, plus a desktop app at each front desk); staff portal (web, plus a phone app) |
 | Shared services | Member sign-in, staff sign-in, gateway, notification service, help-article base, typed contracts |
 
 The studio names, sizes and outside-system names in this table are the reference values the spec uses. Everything else about the tenant (API details, group names, labour rules) is an open question (Q-11, Q-03). Its config is §4b.1.
 
-The gateway system keys are: `booking_vendor`, `shift_tool`, `payroll`, `payments` (the card processor), `calendar`, `llm`, `staff_directory`.
+The gateway system keys are: `booking_vendor`, `shift_tool`, `payments` (the card processor), `calendar`, `llm`, `staff_directory`. Gusto has no gateway key, because Kairos makes no calls to Gusto (§18.8).
 
 ## 18.2 Onboarding the tenant
 
@@ -29,7 +29,7 @@ The tenant is onboarded using the procedure in §3.12.1. Specific to this tenant
 |---|---|---|
 | Member sign-in | Validates JWTs; maps `sub` → `Customer`; links to mirrored members by verified email | Store passwords or sessions |
 | Staff sign-in and directory | Validates JWTs; maps groups → roles; handles `person.created` and `person.deactivated` through the gateway, with a nightly sync as backstop; supplies the emails used for person mapping | Hold staff credentials |
-| Gateway | Every outbound call (BookingVendor, ShiftTool, PayrollCo, payments, calendar, LLM, directory). Kairos authenticates with its own service identity, and the gateway adds the outside credentials. Inbound events arrive at `POST /sync/inbound/{system}`, signed. Credential rotation for outside systems happens in the gateway and needs no Kairos change. Adding or removing an integration means adding or removing a gateway route; the Kairos side is a `DomainModeSetting` or flag change | Hold any outside key |
+| Gateway | Every outbound call (BookingVendor, ShiftTool, payments, calendar, LLM, directory). Kairos authenticates with its own service identity, and the gateway adds the outside credentials. Inbound events arrive at `POST /sync/inbound/{system}`, signed. Credential rotation for outside systems happens in the gateway and needs no Kairos change. Adding or removing an integration means adding or removing a gateway route; the Kairos side is a `DomainModeSetting` or flag change | Hold any outside key |
 | Notification service | Every message: workflows, offers, confirmations, export links. Recipients are references (`customer:…`, `staff:…`) that the notification service resolves | Send email, SMS, push or chat directly |
 | Help-article base | Read by the member and staff assistants. Scheduling policy answers come from `GET /policies/{key}/text`, so they match the live config | Store help content |
 | Typed contracts | OpenAPI and JSON Schema event contracts in `packages/contracts`. The services above are consumed the same way | Read another service's database |
@@ -205,22 +205,94 @@ Every mode change is behind a flag and is audited. It follows the **two-person r
 
 **Source of truth during a switch.** While `write_freeze` is set, the outside system remains the record. The new mode takes effect in the same batch that clears the freeze.
 
-## 18.8 Payroll export
+## 18.8 Payroll export to Gusto (CSV)
 
-- **Hours records** are created for desk shifts and for teaching, mirrored or owned. They move from `scheduled` to `worked` (after the session ends, or from time-clock punches), then `approved` (by a manager each pay period), then `exported`. Studio closures may void them (§3.12.2).
-- **The export.** `POST /exports/hours` builds a batch with a stable `batch_id` and sends it to PayrollCo through the gateway (idempotency key = `batch_id`). Each line carries `payroll_ref`, date, start, end, elapsed minutes, kind and studio. Corrections go into the next batch as adjustment lines.
-- **Offboarded staff.** Their hours are included up to their effective date, and those lines are flagged `final`.
-- Kairos stops at hours. It never handles pay rates or taxes.
+Kairos stops at hours. It never holds pay rates, computes pay, or calls Gusto. For each pay period it produces CSV files in **Gusto's CSV upload format**. A manager downloads them and uploads them in Gusto's run-payroll screen (Gusto: *Upload employees' hours and earnings to payroll*). Gusto then applies pay rates, taxes and overtime pay.
 
-**Which system sends each kind of hours to PayrollCo** (D-36). Kairos exports only the kinds it is the source for, so nobody is paid twice:
+### 18.8.1 Hours records
+
+- **Lifecycle:**
+  1. **Created** for desk shifts and for teaching (mirrored or owned) when the assignment is confirmed.
+  2. **`worked`** once the session ends, or from time-clock punches.
+  3. **`approved`** by a manager, for each pay period.
+  4. **`exported`** once the period's export includes them.
+- **Voided records:** studio closures may void them (§3.12.2).
+- **Offboarded staff:** their hours up to the effective date are included and flagged `final` in the export summary.
+- **Approval gate:** the export only includes `approved` records. If any record in the period is still `worked`, the export reports it, and the manager approves those records or excludes them explicitly.
+
+### 18.8.2 What goes in the files
+
+- **Employees and contractors.** Gusto uses different CSV templates for employees and contractors. Each person has `payroll_type: employee | contractor` (a person field, §3.4), so one export makes **up to two files**: `…_employees.csv` and `…_contractors.csv`. Many studios pay teachers as contractors (Q-15).
+- **Employee file rows.** One row per **employee × workweek** inside the pay period. The workweek starts on `tenant.week_starts` and must match the workweek set in Gusto. The row's workweek column lets Gusto compute the regular rate across mixed work.
+- **Hour columns.**
+  - Regular, overtime and double-overtime hours are decimals with 2 places (`12.50`).
+  - They are summed from elapsed minutes (I-28) and rounded half-up once per cell.
+  - A person who does both desk work and teaching gets **one row per kind** when `payroll_export.split_by_kind` is true, so different Gusto pay rates can apply. Gusto must have a matching job or pay rate for each kind (Q-16). Otherwise everything goes in one row.
+- **Overtime classification** (D-43). Kairos only *classifies* hours; Gusto prices them.
+  - The rule comes from `payroll_export.overtime`. The default is the FLSA rule used in New York: weekly hours over 40 are overtime; no daily overtime.
+  - When a week mixes desk work and teaching, overtime is assigned to the **chronologically last** hours of the workweek. This is deterministic, and it is the usual employer practice.
+  - The rule is for legal confirmation (Q-03).
+- **Contractor file.** One row per contractor for the pay period, giving hours worked only, with no wage. Gusto applies the contractor's hourly rate.
+- **People identifiers.** Every person with hours in the period must have `payroll_ref`, the identifier Gusto's template matches on (Q-14). If any is missing, the export fails with `PAYROLL_REF_MISSING` and lists the people.
+- **Columns Kairos owns vs the rest.**
+  - Kairos fills only the columns mapped in `payroll_export.columns`.
+  - It writes an explicit `0.00` in owned hour columns that have no hours, so a re-upload replaces earlier values. Gusto treats a zero as an overwrite and a blank as "leave unchanged".
+  - It leaves every other template column **blank**, so bonuses, reimbursements and similar entries made in Gusto are untouched.
+- **File format.**
+  - RFC 4180 CSV, UTF-8, with no byte-order mark (BOM) and CRLF line endings.
+  - The header row is the exact Gusto template header row, in the template's column order, stored in `payroll_export.template_headers`.
+  - Rows are sorted by last name, first name, workweek start, then kind.
+  - File name: `<tenant>_<env>_<period_start>_<period_end>_<employees|contractors>_v<n>.csv`. In preview, the name starts with `PREVIEW_`.
+
+### 18.8.3 Config (locked; owner only)
+
+```ts
+interface PayrollExportSettings {                   // TenantSettings.payroll_export (§4.3)
+  format: 'gusto_csv';
+  pay_period: { frequency: 'weekly' | 'biweekly' | 'semimonthly' | 'monthly'; anchor: LocalDate };  // must match Gusto
+  template_headers: { employees: string[]; contractors: string[] };   // copied verbatim from Gusto's downloaded templates
+  columns: {                                        // Kairos field → Gusto header (must appear in template_headers)
+    employees: { payroll_ref: string; last_name?: string; first_name?: string; workweek?: string;
+                 job?: string;                      // required when split_by_kind: identifies the Gusto job / pay rate
+                 regular_hours: string; overtime_hours?: string; double_overtime_hours?: string };
+    contractors: { payroll_ref: string; last_name?: string; first_name?: string; hours: string };
+  };
+  overtime: { weekly_hours: number | null; daily_hours: number | null; daily_double_hours: number | null };
+  split_by_kind: boolean;
+  job_names?: { shift: string; teaching: string };  // the values written in the job column; must match Gusto job titles
+}
+```
+
+Validation:
+- Every mapped header must exist in `template_headers` (`PAYROLL_HEADER_UNKNOWN`).
+- `split_by_kind: true` requires `columns.employees.job` and `job_names` (`PAYROLL_JOB_COLUMN_MISSING`). Without a job column, two rows for one person and workweek would be ambiguous in Gusto.
+- `weekly_hours` must be at least the highest `max_hours/week` rule in the config, or the warning `PAYROLL_OT_BELOW_ROSTER_CAP` is shown.
+
+The values in §4b.1 are **placeholders**. They are replaced with the headers from the tenant's own downloaded templates at onboarding (Q-14). Gusto's help pages don't publish the header list, so it must be taken from the template itself.
+
+### 18.8.4 Producing, correcting and re-exporting
+
+1. `POST /exports/hours {period_start, period_end}` (manager or owner) checks that the period matches `pay_period`. It builds the files from approved records and returns `{export_id, version, summary}`. The summary gives totals per person, per kind and per workweek, plus every overtime row and every warning.
+2. `GET /exports/hours/{id}/files/{employees|contractors}` returns a signed download URL that is valid for 24 h. The files contain names and identifiers, so they are treated as PII: they are kept 30 days, and every download is audited (§13.3).
+3. **Before upload:** a manager can fix hours and export again. That creates a new version, `v2`, built completely from the current approved hours. Uploading it in Gusto replaces the earlier entries, because Gusto overwrites prior uploads for the same payroll.
+4. `POST /exports/hours/{id}/mark-submitted` (after the manager runs the payroll in Gusto) moves its records to `exported` and locks the period.
+5. **After submission:** a change to hours in a locked period is never folded into a later period's file, because that would misstate its workweek and overtime. Instead:
+   - Kairos writes an adjustment row to `GET /exports/hours/{id}/corrections.csv`, with the person, workweek, kind, old hours, new hours and reason;
+   - it creates a `manager_inbox` task to enter the correction in Gusto (an off-cycle payroll or an adjustment);
+   - the correction is marked done with `POST /exports/hours/{id}/corrections/{c}/done`.
+6. Exports are deterministic: the same approved records always produce byte-identical files, which is checked by golden-file tests (§14.1). An example file is at `fixtures/exports/gusto_employees.example.csv`.
+
+### 18.8.5 Which system sends each kind of hours to Gusto (D-36)
+
+Kairos exports only the kinds it is the source for, so nobody is paid twice:
 
 | Phase (§15) | Desk hours (`kind: shift`) | Teaching hours (`kind: teaching`) |
 |---|---|---|
-| Before Phase 1 | ShiftTool (as today) | The current system, as today (BookingVendor or manual; Q-13) |
-| 1–2 | **Kairos**, from the shifts cutover date. ShiftTool's payroll export is switched off on that date. During the 60-day push period, ShiftTool receives shifts but does not export hours | Current system |
-| 3 onwards | Kairos | **Kairos**, from the classes cutover date; the current system's teaching export is switched off on that date |
+| Before Phase 1 | ShiftTool, or however desk hours reach Gusto today | The current system, as today (Q-13) |
+| 1–2 | **Kairos**, from the shifts cutover date. ShiftTool's hours stop going to Gusto on that date. During the 60-day push period, ShiftTool receives shifts but its hours are not uploaded | Current system |
+| 3 onwards | Kairos | **Kairos**, from the classes cutover date. The current teaching-hours feed stops on that date |
 
-The cutover date is an export boundary. Hours whose `scheduled_start` is before the date belong to the old system. The Phase 1 parallel-run check (§15) compares Kairos's desk hours against ShiftTool's **computed** hours. Only Kairos's hours are sent.
+The cutover date is an export boundary: hours whose `scheduled_start` is before it belong to the old system. If a pay period straddles the cutover, Kairos exports only its side, and the summary says so. The Phase 1 parallel-run check (§15) compares Kairos's desk hours against ShiftTool's **computed** hours. Only Kairos's file is uploaded.
 
 ## 18.9 Cutover order
 

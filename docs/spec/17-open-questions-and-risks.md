@@ -14,9 +14,12 @@
 | Q-08 | Retention for closed member accounts: 2 years, then erase? | Yes, subject to legal | Phase 2 |
 | Q-09 | Guests booked with a member (`allow_guests`): how many, and paid how? | 1 guest per booking, paid by drop-in price | Phase 4 |
 | Q-10 | Minimum age for online booking, and how it is collected (D-31)? | 18; a date of birth at signup through the member sign-in service | Phase 2 |
-| Q-11 | Real issuer URLs, directory group names (including the groups for `teacher` and `desk_staff`), and BookingVendor/ShiftTool/PayrollCo API details | Collect at onboarding (the §4b.1 values are placeholders) | Phase 0 |
+| Q-11 | Real issuer URLs, directory group names (including the groups for `teacher` and `desk_staff`), and BookingVendor/ShiftTool API details (Gusto needs no API: §18.8, Q-14) | Collect at onboarding (the §4b.1 values are placeholders) | Phase 0 |
 | Q-12 | Real desk shift start times per studio and weekday (§4b.1 `starts` are placeholders that fit the published hours) | Tenant ops to confirm before the first roster publish | Phase 1 |
-| Q-13 | Which system pays teaching hours today (BookingVendor export, or manual)? | Keep it until the classes cutover (D-36) | Phase 1 |
+| Q-13 | Which system feeds teaching hours to Gusto today (BookingVendor export, or manual)? | Keep it until the classes cutover (D-36) | Phase 1 |
+| Q-14 | The exact header rows of the tenant's Gusto employee and contractor CSV templates, and which column Gusto matches people on (employee ID or name) | Download both templates in Gusto at onboarding and copy the headers into `payroll_export.template_headers`; set `payroll_ref` per person | Phase 1 |
+| Q-15 | Are teachers employees or contractors in Gusto? Are any desk staff contractors? | Set `payroll_type` per person at onboarding | Phase 1 |
+| Q-16 | Do teaching and desk work have different pay rates in Gusto, and how does the employee template take hours per rate or job? | If yes, `split_by_kind: true`, with one row per kind mapped to the Gusto job; confirm against the template | Phase 1 |
 
 ## 17.2 Risks
 

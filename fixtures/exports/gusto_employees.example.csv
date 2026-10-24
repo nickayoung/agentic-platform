@@ -1,0 +1,6 @@
+employee_id,last_name,first_name,workweek,job,regular_hours,overtime_hours,double_overtime_hours,bonus,reimbursement
+E-1042,Okafor,Priya,03/01/2027 - 03/07/2027,Front Desk,26.50,0.00,0.00,,
+E-1042,Okafor,Priya,03/01/2027 - 03/07/2027,Yoga Teacher,13.50,2.25,0.00,,
+E-1042,Okafor,Priya,03/08/2027 - 03/14/2027,Front Desk,32.00,0.00,0.00,,
+E-1077,Reyes,Sam,03/01/2027 - 03/07/2027,Front Desk,34.00,0.00,0.00,,
+E-1077,Reyes,Sam,03/08/2027 - 03/14/2027,Front Desk,38.25,0.00,0.00,,

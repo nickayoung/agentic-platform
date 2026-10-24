@@ -86,6 +86,9 @@ Errors block publish. Warnings must be acknowledged when the draft is submitted.
 | L4 | `UNSTAFFED_NOT_AFTER_DEADLINE` | W | `unstaffed.check_at` is at or before the `sub_finder` workflow's deadline, so a substitute found just before the deadline cannot be approved in time. The check must be at least 15 min after the deadline |
 | L4 | `WORKFLOW_CYCLE` | E | Static cycle in the workflow event graph |
 | L4 | `FEE_ABOVE_CEILING` | E | A fee is above `tenant.fee_ceiling` |
+| L4 | `PAYROLL_HEADER_UNKNOWN` | E | A `payroll_export.columns` header is missing from `template_headers` |
+| L4 | `PAYROLL_JOB_COLUMN_MISSING` | E | `split_by_kind` is set without a job column and `job_names` |
+| L4 | `PAYROLL_OT_BELOW_ROSTER_CAP` | W | `overtime.weekly_hours` is below the highest `max_hours/week` rule, so rosters can legally produce overtime |
 | L4 | `WAITLIST_SILENT` | W | `offer_all` mode with no workflow on `waitlist.offered`, or no workflow on `waitlist.skipped` |
 | L4 | `KIND_MISMATCH` | W | `kind: shift` with customers, or `kind: class` with `participants: none` |
 | L4 | `DST_SHIFTED_OCCURRENCE` | I | An occurrence falls on a non-existent local time (§7.10) |

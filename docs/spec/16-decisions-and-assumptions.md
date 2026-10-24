@@ -38,6 +38,7 @@
 | D-32 | A staff member linked to a member account can't book a class that overlaps their own assignment | One calendar per human |
 | D-33 | A substitute offer lasts 20 min, or 10 min when the class starts within 6 h. The top 3 candidates are asked at once | Speed versus fairness |
 | D-34 | When an outside system creates a class that overlaps an *owned* desk shift, Kairos does **not** vacate the shift automatically. It raises a conflict, alerts managers and blocks the time | A human decides which side changes. Revisit after Phase 1 data (Q-05) |
+| D-43 | **Payroll is Gusto, fed by CSV upload.** Kairos makes no calls to Gusto. It produces files per pay period: an employees file (one row per person × workweek, optionally per kind) and a contractors file. It classifies regular and overtime hours with a configurable rule (FLSA weekly 40 by default; overtime goes to the chronologically last hours) and never handles rates or pay. Corrections after submission go into a corrections file for manual entry | The owner chose Gusto and CSV. It keeps Kairos out of payroll (non-goal) while giving Gusto what its upload expects |
 | D-35 | Tenant data is retained 30 days after closure, then crypto-shredded, and a deletion certificate is issued. A legal hold blocks deletion | Clear offboarding (review F-08) |
 | D-36 | Payroll source per kind and phase (§18.8). Kairos exports desk hours from the shifts cutover, and teaching hours from the classes cutover. The old systems' exports are switched off on those dates | Nobody is paid twice (review G-09) |
 | D-37 | Built-in policy behaviour runs only for owned domains. Shadow is a dry run, and mirror runs nothing (§7.13) | Kairos never acts on another system's records (review G-02) |
@@ -55,7 +56,7 @@
 | A-02 | The per-object store is single-threaded per object, durable, and supports alarms | Fall back to the database plus the sweep; correctness is unaffected |
 | A-03 | BookingVendor's API (via the gateway) covers reading classes, bookings and members, writing bookings, cancelling, changing teachers and creating classes, and it emits events | No events: poll every 2 min. No class creation: cut over classes and bookings together |
 | A-04 | ShiftTool can be read and written during the 60-day push period | Manual parallel run |
-| A-05 | PayrollCo accepts imports through the gateway | Downloadable file |
+| A-05 | Gusto's CSV upload for employee hours (with a workweek column) and its separate contractor CSV upload stay available. Re-uploads for the same payroll overwrite, a zero overwrites, and a blank leaves values unchanged (per Gusto's help pages) | Switch to Gusto's API through the gateway (a new decision) |
 | A-06 | Batches allow ≥ 100 statements and ≤ 1 MB | Smaller chunks |
 | A-07 | The staff directory exposes people, groups, location, active state and email, plus `person.created` and `person.deactivated` events | Nightly sync only, so offboarding takes ≤ 24 h unless a manager deactivates the person in Kairos |
 | A-08 | Member emails are verified by the member sign-in service | Linking at the desk |

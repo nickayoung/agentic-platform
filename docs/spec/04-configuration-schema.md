@@ -42,6 +42,7 @@ The configuration agent may not patch:
 - `/access`
 - `/tenant/environment_guards`
 - `/tenant/fee_ceiling`
+- `/tenant/payroll_export`
 - any penalty `fee` whose amount is above `tenant.fee_ceiling`
 
 Such patches are rejected with `LOCKED_PATH`. Only a human with the `owner` role can change these paths, through the same draft-and-approval flow.
@@ -81,6 +82,7 @@ interface TenantSettings {
   closure_pay_notice: Duration;          // §3.12.2; default "2h"
   closing_notice: Duration;              // notice to members when the tenant closes; default "14d"
   refund_credit_product: Key;            // pack granted when refund.timely = 'credit' (§4.8)
+  payroll_export: PayrollExportSettings; // LOCKED; Gusto CSV settings (§18.8.3)
   environment_guards: { preview_outbound: 'sandbox' | 'record_only' };   // LOCKED
 }
 interface LocationDef {

@@ -27,7 +27,7 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 - **Mirror ingestion and drift:** mirror classes (including teacher claims), bookings and members. Drift detection includes `unmapped_person`.
 - **Desk shifts, owned:** templates and coverage; availability, time off and swaps; the person-rule validator with `resource_day` guards; the desk roster solver; proposals; the roster saga; the staleness guard.
 - **ShiftTool:** `outbound_push` so ShiftTool stays current.
-- **Hours:** hours records and the PayrollCo export; calendar sync.
+- **Hours:** hours records and the Gusto CSV export (§18.8); calendar sync.
 - **Staff lifecycle:** onboarding and offboarding (§3.12.4).
 - **Write-through façade** (§7.12): holds, bookings, cancellations and check-ins are forwarded to BookingVendor, with only the pre-checks run locally. Built-in policy behaviour stays off for mirrored domains (§7.13).
 - **Front ends:** the portal and desk app use `/assignments`, `/desk/now`, `/sessions?include=assignments`, `/tasks`, `/check-ins` (write-through), and the offline queue. The website timetable and mat map read the mirror, and bookings are written through.
@@ -37,7 +37,7 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 1. **A.5 passes on preview data seeded from production**, including the mode-guard variant (Kairos never cancels or promotes on mirrored classes). A teacher of a mirrored class can't be given an overlapping desk shift through the portal, the API or the solver. A conflicting mirror import raises `cross_domain_conflict` within 60 s. An unmapped teacher blocks desk assignments at that studio and time, and raises an alert.
 2. The desk roster for 3 studios × 2 weeks solves in ≤ 15 s. Infeasible coverage returns a minimal conflict set.
 3. Seeded drift is detected 100 % of the time. The mirror stays at most 2 min behind BookingVendor at p95.
-4. During a 60-day parallel run, Kairos's desk hours match ShiftTool's computed hours exactly. Only Kairos exports desk hours to PayrollCo (§18.8).
+4. During a 60-day parallel run, Kairos's desk hours match ShiftTool's computed hours exactly. Only Kairos's Gusto CSV is uploaded for desk hours (§18.8). A dry-run upload of each Kairos file into the real Gusto payroll is accepted without errors and then cancelled before submitting.
 5. A staff deactivation takes effect within 60 s. Future shifts are vacated and tokens are refused.
 6. A rollback rehearsal for shifts (owner → mirror) completes in ≤ 30 min.
 

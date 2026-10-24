@@ -59,6 +59,7 @@ On every request, Kairos also checks the person's or member's `state` (cached fo
 | Bookings, ledger, payment references (processor IDs, never card data) | Financial records | 7 years, pseudonymised after erasure |
 | Staff personal fields | Contact, scheduling | 90 days after offboarding (§3.12.4) |
 | Staff assignments and hours | Payroll and audit | 7 years |
+| Gusto CSV export files (names, payroll IDs, hours) | Manager upload to Gusto | 30 days; signed download links valid 24 h; every download audited |
 | Agent transcripts | Debugging, evals | 30 days |
 
 - **Encryption:** application-layer encryption with a per-tenant data key (AES-256-GCM), wrapped by Kairos's secret store and rotated yearly. Destroying the key crypto-shreds the tenant (§3.12.1).
@@ -104,7 +105,7 @@ On every request, Kairos also checks the person's or member's `state` (cached fo
 | SessionGate | Nothing visible. Batches go straight to the database | — | First-come ordering during rushes only |
 | TimerObject alarms | Timers fire up to 60 s late (sweep) | Sweep every minute | Nothing |
 | Notification service | Messages delayed | Outbox retries for 24 h, then `dead` plus a manager task | Messages older than 24 h are not sent, and the failure is visible in the task list |
-| Gateway | Mirror-mode writes: `OUTSIDE_UNAVAILABLE` (§7.12). Owned-mode refunds, fees, pushes and payroll exports are delayed | Outbox retries for 24 h, then `dead` plus an alert | No money moves without a successful gateway call, and every pending money job stays in the outbox |
+| Gateway | Mirror-mode writes: `OUTSIDE_UNAVAILABLE` (§7.12). Owned-mode refunds, fees and pushes are delayed. Payroll CSV exports are unaffected, because they need no gateway call | Outbox retries for 24 h, then `dead` plus an alert | No money moves without a successful gateway call, and every pending money job stays in the outbox |
 | Solver worker | Roster jobs show "pending". Substitute candidates still work (no solver needed) | Job queue | Nothing |
 | LLM provider | Hooks fall back to deterministic mode, so the member assistant falls back to templated answers | — | Nothing |
 

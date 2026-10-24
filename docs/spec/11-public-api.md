@@ -43,7 +43,7 @@ Roles are listed per group. The full matrix is in §13.2.
 | `GET /policies/{key}/text?locale=` | Rendered policy text, for the website and agents |
 | `POST /locations/{key}/closures {start, end, reason, preview?}` | Studio closure (§3.12.2). Manager |
 | `GET /resources?kind=&role=&location=`, `GET /resources/{id}` | Rooms, desks and people (staff-visible fields) |
-| `PATCH /resources/{id}` | People: skills and expiry, roles, `payroll_ref`, `home_location_key`, `calendar_sync`. Manager |
+| `PATCH /resources/{id}` | People: skills and expiry, roles, `payroll_ref`, `payroll_type`, `home_location_key`, `calendar_sync`. Manager |
 | `POST /resources/{id}/blocks {start, end, reason, preview?}`, `DELETE /resources/{id}/blocks/{blk}` | Take a room or mat out of service (§3.12.3). Manager or desk |
 | `POST /resources/{id}/deactivate {effective, reason}`, `POST /resources/{id}/reactivate` | Staff offboarding and rehire (§3.12.4). Manager; also fired by the directory |
 | `GET`/`POST /resources/{id}/availability`, `DELETE …/{avl}` | Availability (self or manager) |
@@ -111,7 +111,8 @@ Roles are listed per group. The full matrix is in §13.2.
 | `POST /swaps`, `POST /swaps/{id}/accept`, `/approve`, `/withdraw` | Swaps |
 | `GET /desk/now?location=` | Who is on the desk now and next |
 | `GET`/`POST /tasks`, `POST /tasks/{id}/complete` | Desk checklists and manager inbox |
-| `GET /hours?from=&to=&resource_id=`, `POST /hours/{id}/approve`, `POST /exports/hours {period_start, period_end}` | Hours and the payroll export |
+| `GET /hours?from=&to=&resource_id=`, `POST /hours/{id}/approve` | Hours and approvals |
+| `POST /exports/hours {period_start, period_end}` → `{export_id, version, summary}`; `GET /exports/hours/{id}`; `GET /exports/hours/{id}/files/{employees\|contractors}` (signed CSV URL, 24 h); `POST /exports/hours/{id}/mark-submitted`; `GET /exports/hours/{id}/corrections.csv`; `POST /exports/hours/{id}/corrections/{c}/done` | Gusto CSV export (§18.8). Manager or owner; downloads are audited |
 | `POST /time-clock/punches` | Time clock (later phase) |
 
 ### Agents, sync, flags, events, audit, tenant

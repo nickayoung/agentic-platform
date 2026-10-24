@@ -103,7 +103,8 @@ interface Resource {
   layout_key: ConfigKey | null;
   state: 'active' | 'out_of_service' | 'leaving' | 'inactive';
   leaves_at: UtcMs | null;                                // people: last day (§3.12.4)
-  payroll_ref: string | null;                             // people: identifier in PayrollCo export
+  payroll_ref: string | null;                             // people: identifier Gusto's CSV template matches on (§18.8)
+  payroll_type: 'employee' | 'contractor' | null;         // people: which Gusto CSV template they go in
   calendar_sync: boolean;                                 // people: opt-in (§18.3)
   source: Source;
 }

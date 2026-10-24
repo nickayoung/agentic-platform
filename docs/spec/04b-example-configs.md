@@ -26,6 +26,19 @@ tenant:
   closure_pay_notice: 2h
   closing_notice: 14d
   refund_credit_product: refund_credit
+  payroll_export:      # LOCKED. Placeholder headers: replace with the tenant's downloaded Gusto templates (Q-14)
+    format: gusto_csv
+    pay_period: { frequency: biweekly, anchor: "2027-03-01" }
+    template_headers:
+      employees: [employee_id, last_name, first_name, workweek, job, regular_hours, overtime_hours, double_overtime_hours, bonus, reimbursement]
+      contractors: [contractor_id, last_name, first_name, hours, wage, bonus, reimbursement, memo]
+    columns:
+      employees: { payroll_ref: employee_id, last_name: last_name, first_name: first_name, workweek: workweek, job: job,
+                   regular_hours: regular_hours, overtime_hours: overtime_hours, double_overtime_hours: double_overtime_hours }
+      contractors: { payroll_ref: contractor_id, last_name: last_name, first_name: first_name, hours: hours }
+    overtime: { weekly_hours: 40, daily_hours: null, daily_double_hours: null }
+    split_by_kind: true
+    job_names: { shift: "Front Desk", teaching: "Yoga Teacher" }
   environment_guards: { preview_outbound: sandbox }
 locations:
   - { key: park_slope, name: "Park Slope", timezone: America/New_York,
@@ -517,6 +530,18 @@ tenant:
   closure_pay_notice: 2h
   closing_notice: 14d
   refund_credit_product: refund_credit
+  payroll_export:
+    format: gusto_csv
+    pay_period: { frequency: semimonthly, anchor: "2027-01-01" }
+    template_headers:
+      employees: [employee_id, last_name, first_name, workweek, regular_hours, overtime_hours]
+      contractors: [contractor_id, last_name, first_name, hours]
+    columns:
+      employees: { payroll_ref: employee_id, last_name: last_name, first_name: first_name, workweek: workweek,
+                   regular_hours: regular_hours, overtime_hours: overtime_hours }
+      contractors: { payroll_ref: contractor_id, last_name: last_name, first_name: first_name, hours: hours }
+    overtime: { weekly_hours: 40, daily_hours: null, daily_double_hours: null }
+    split_by_kind: false
   environment_guards: { preview_outbound: record_only }
 locations:
   - { key: main, name: "Main studio", timezone: America/New_York }

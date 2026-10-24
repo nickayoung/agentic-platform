@@ -92,6 +92,18 @@ Zones: `America/New_York` and `Europe/London`.
 - Every solution passes the validator.
 - A timeout returns either `feasible` with a gap, or `unknown`.
 
+### Payroll export tests (Gusto CSV)
+
+- **Golden files.** Fixed hours records → byte-identical employee and contractor files (`fixtures/exports/`).
+- **Overtime.** Weeks with exactly 40.00 h, 40.08 h, and mixed desk and teaching work. Overtime goes on the last hours in time order, and rows are split by kind.
+- **Workweeks.** A pay period that straddles two workweeks, and a workweek that straddles the period boundary (only hours inside the period are exported).
+- **Rounding.** Minute totals that round across a cell boundary, rounded half-up once per cell.
+- **Zero and blank.** Owned columns always hold a value (`0.00` when empty). Unowned columns are always blank.
+- **Blocking checks.** A missing `payroll_ref` fails the export with `PAYROLL_REF_MISSING`. Records still `worked` (not yet approved) are reported.
+- **Corrections.** Re-exporting before submission gives v2. A correction after submission goes to `corrections.csv` and is never added to the next period.
+- **Cutover.** A pay period that straddles the cutover exports only Kairos-sourced hours.
+- **DST.** A fall-back week sums elapsed minutes, not wall-clock time.
+
 ### Workflow tests
 
 - Duplicate event deliveries and duplicate timer fires.
