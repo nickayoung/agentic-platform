@@ -1,0 +1,8 @@
+// kairos-dev-gateway: preview-only stand-in for the tenant's gateway (demo BookingVendor / ShiftTool data).
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "kairos-dev-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"]
+}

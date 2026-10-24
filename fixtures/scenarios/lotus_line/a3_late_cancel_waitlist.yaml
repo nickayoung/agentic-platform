@@ -53,10 +53,15 @@ variants:
       - place: { session: wb_vinyasa_1830@2027-03-09, place: mat_3, partition: front_row_unlimited }
       - booking: { customer: eli, place: mat_3, state: confirmed, booked_via: waitlist }
       - waitlist_entry: { customer: dana, state: waiting }
-  - name: gate down
-    gate: unavailable
+  - name: object restarts after the cancel commits (queued promotion lost; the scheduler alarm promotes)
+    restart: after_step_1
     then:
       - within: { seconds: 90, expect: { booking: { customer: dana, place: mat_3, state: confirmed } } }
+  - name: object restarts and the alarm is lost (the backstop re-arms it)
+    restart: after_step_1
+    alarms: dropped
+    then:
+      - within: { seconds: 360, expect: { booking: { customer: dana, place: mat_3, state: confirmed } } }
   - name: bookings mirrored (Phase 1) — no Kairos promotion
     domain_modes: { classes: mirror, bookings: mirror, members: mirror, shifts: owner }
     then:

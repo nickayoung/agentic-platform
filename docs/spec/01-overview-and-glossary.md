@@ -27,7 +27,8 @@ Two further components work on top of the engines:
  │ publish              │                  │ Sync (mirror/shadow)     │              └────────────────┘
  └──────────────────────┘                  └────────────┬─────────────┘
                                                         │ one SQLite DB per tenant per environment
-                                                        ▼ (occupancy, places, bookings, ledger, outbox)
+                                                        ▼ (a Durable Object's storage, §19: occupancy,
+                                                           places, bookings, ledger, outbox)
 ```
 
 ## 1.2 Design principles
@@ -36,7 +37,7 @@ Two further components work on top of the engines:
 2. **The schema is the boundary.** If the schema cannot express a behaviour, Kairos cannot do it. The agent says so. It does not approximate the behaviour without telling the owner.
 3. **One calendar for people and rooms.** Classes and desk shifts are both **sessions**, and they claim resource time in one **occupancy** table. Its unique key makes it impossible for one person or room to be in two places at once. This holds whether the claim came from Kairos or was mirrored from an outside system (§12.3).
 4. **Engines never branch on session kind.** `template.kind` (`class` or `shift`) is a UI label. All behaviour comes from requirements, capacity, scheduling mode and policies. A CI lint rule enforces this (§14.1).
-5. **Correctness lives in the database; speed lives above it.** Unique keys, CHECK constraints and guarded batches enforce correctness (§12.2). The per-session coordinator (SessionGate) adds fair ordering and fast answers. Correctness never depends on it.
+5. **Correctness lives in the database; speed lives above it.** Unique keys, CHECK constraints and single-writer transactions enforce correctness (§12.2). The per-session queue (SessionGate) adds fair ordering and fast answers. Correctness never depends on it.
 6. **Config is code.** Configs are versioned and immutable. Every change is validated, simulated, explained, approved by a human, published, and can be rolled back. Existing bookings are never changed silently (§6.8).
 7. **Fit beside, don't duplicate.** Kairos trusts the tenant's sign-in services. It calls outside systems only through the gateway and sends messages only through the notification service. It exports hours to payroll and stops there. It never stores card data.
 8. **Coexist, then own.** Each data domain (classes, bookings, members, shifts) moves separately from mirror to shadow to owner, and can be rolled back (§18.5).
@@ -128,5 +129,7 @@ Two further components work on top of the engines:
 | **Person mapping** | The link from an outside system's person ID (for example a BookingVendor instructor) to a Kairos person resource (§18.5). |
 | **Drift** | A difference between Kairos's copy of a record and the outside system's record. |
 | **Gateway** | The tenant's shared proxy for every outbound call. It holds all outside credentials. |
-| **SessionGate** | A per-class coordinator object (one per-object store instance) that orders contended requests and sets hold-expiry alarms. |
+| **SessionGate** | A per-class in-memory command queue inside the tenant's `TenantCore` object. It orders contended requests across `await`s and caches free counts (§19.3). |
+| **Batch** | One atomic write: a single synchronous SQLite transaction in `TenantCore` that also writes the audit row, events and outbox rows (§12.2). |
+| **TenantCore** | The Durable Object that holds one tenant-environment's `kairos-core` database and runs the engines (§19.1). |
 | **CEL** | Common Expression Language, the only way to write conditional logic in config (§5). |

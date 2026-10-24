@@ -1,0 +1,23 @@
+{
+  "name": "@kairos/scheduler",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@kairos/db": "workspace:*",
+    "@kairos/errors": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.7",
+    "@cloudflare/workers-types": "5.20261024.1",
+    "@types/node": "^22.20.5",
+    "fast-check": "4.10.2",
+    "vitest": "4.1.12"
+  }
+}

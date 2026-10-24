@@ -16,7 +16,8 @@ CEL wins on static checking and readability. Both matter for config written by a
 
 The TypeScript maturity risk is handled in three ways:
 - `packages/expr` wraps a maintained TypeScript CEL implementation behind `compile(source, slot)` and `evaluate(compiled, activation)`.
-- That implementation must pass this profile's subset of the cel-spec conformance tests.
+- That implementation must pass this profile's subset of the cel-spec conformance tests, run inside `workerd`.
+- It must **interpret** a checked AST. Workers forbid `eval` and `new Function`, so a library that compiles expressions to JavaScript is not acceptable (§19.12).
 - If no library passes, the profile is small enough to build in house: about 3–4k lines (A-13).
 
 ## 5.2 Profile

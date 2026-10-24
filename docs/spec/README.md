@@ -1,6 +1,6 @@
 # Kairos for Yoga Studios — Technical Specification
 
-**Status:** Draft v3.0 (yoga-only; third review applied) · **Config schema:** 2.1 · **Audience:** platform engineers and coding agents · **Date:** 2026-10-24
+**Status:** Draft v3.1 (yoga-only; third review applied; runs entirely on Cloudflare) · **Config schema:** 2.1 · **Audience:** platform engineers and coding agents · **Date:** 2026-10-24
 
 Kairos is a scheduling platform for **multi-studio yoga businesses**. The studio owner describes how the business works: studios, rooms, mat layouts, class types, timetable, memberships, cancellation rules, desk cover. A configuration agent compiles that description into a typed, versioned configuration document. Deterministic engines execute it. No LLM call sits in the booking path.
 
@@ -27,6 +27,15 @@ v3.0 applies the third review (H-01 – H-28). The review is in [`docs/reviews/r
 - **Acceptance fixtures fixed and extended** (A.3–A.5).
 - **Kairos manages everything except payroll** (product owner): it sends every member and staff message from go-live (`tenant.member_messaging: kairos`, D-51), and uses **Stripe** for checkout, fees, refunds and memberships (§18.10).
 
+## What changed in v3.1
+
+v3.1 binds the spec to the chosen stack (**§19**). **Everything runs on Cloudflare** (D-69): TypeScript with **Zod** and **Hono** on **Workers**, tenant databases as SQLite-backed **Durable Objects**, the solver in **Cloudflare Containers**, and a Kairos console in **TanStack Start**. No domain behaviour changes. The main mechanical changes:
+
+- A **batch** is now one single-writer `transactionSync`. Checks run as code; the scalar-assert pattern, `batch_assert` and `last_batch` are gone (§12.2, D-61, D-63).
+- **SessionGate** is a queue inside the tenant's `TenantCore` object. Every alarm and sweep is one **scheduler** per object, with a backstop cron (D-64, D-65).
+- **Zod 4** stays the schema language; Hono's `zod-openapi` generates OpenAPI (D-62). Simulations run in throwaway Durable Objects (D-66). Hot data is bounded under the 10 GB object limit (D-68).
+- The trace is in §16.6.
+
 ## Contents
 
 | # | Section | File |
@@ -50,6 +59,7 @@ v3.0 applies the third review (H-01 – H-28). The review is in [`docs/reviews/r
 | 16 | Decisions and assumptions | [16-decisions-and-assumptions.md](16-decisions-and-assumptions.md) |
 | 17 | Open questions and risks | [17-open-questions-and-risks.md](17-open-questions-and-risks.md) |
 | 18 | Reference deployment | [18-reference-deployment.md](18-reference-deployment.md) |
+| 19 | **Platform binding: Cloudflare, TypeScript, TanStack** (added in v3.1) | [19-platform-binding.md](19-platform-binding.md) |
 | A | Acceptance-test walkthrough | [appendix-a-acceptance-walkthrough.md](appendix-a-acceptance-walkthrough.md) |
 | — | Config-agent eval cases | [../../evals/config-agent/](../../evals/config-agent/) |
 

@@ -1,0 +1,52 @@
+// kairos-api. Preview and production are separate deployments with separate Durable Object namespaces,
+// buckets and secrets (§19.1). Secrets (PLATFORM_ADMIN_TOKEN, SERVICE_TOKEN) are set with `wrangler secret put`;
+// the KEK comes from Secrets Store (§19.13).
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "kairos-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "env": {
+    "preview": {
+      "name": "kairos-api-preview",
+      "vars": {
+        "ENVIRONMENT": "preview",
+        "DEV_IDP_HOST": "kairos-dev-idp.lucky-shadow-edb4.workers.dev",
+        "CONSOLE_ORIGINS": "http://localhost:3000,https://kairos-console.lucky-shadow-edb4.workers.dev",
+        "GATEWAY_URL": "https://kairos-dev-gateway.lucky-shadow-edb4.workers.dev"
+      },
+      // preview only: the demo sign-in service (apps/dev-idp)
+      "services": [
+        { "binding": "DEV_IDP", "service": "kairos-dev-idp" },
+        { "binding": "GATEWAY", "service": "kairos-dev-gateway" }
+      ],
+      "triggers": { "crons": ["*/5 * * * *"] },
+      "durable_objects": {
+        "bindings": [
+          { "name": "TENANT_CORE", "class_name": "TenantCore" },
+          { "name": "TENANT_SYNC", "class_name": "TenantSync" },
+          { "name": "CONTROL", "class_name": "ControlPlane" }
+        ]
+      },
+      "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "kairos-archive-preview" }],
+      "secrets_store_secrets": [{ "binding": "KEK", "store_id": "4f72ea73006c430bb167d93045048cac", "secret_name": "kairos-kek-preview" }]
+    },
+    "production": {
+      "name": "kairos-api-production",
+      "vars": { "ENVIRONMENT": "production" },
+      "triggers": { "crons": ["*/5 * * * *"] },
+      "durable_objects": {
+        "bindings": [
+          { "name": "TENANT_CORE", "class_name": "TenantCore" },
+          { "name": "TENANT_SYNC", "class_name": "TenantSync" },
+          { "name": "CONTROL", "class_name": "ControlPlane" }
+        ]
+      },
+      "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "kairos-archive-production" }],
+      "secrets_store_secrets": [{ "binding": "KEK", "store_id": "REPLACE_WITH_STORE_ID", "secret_name": "kairos-kek-production" }]
+    }
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCore", "TenantSync", "ControlPlane"] }]
+}

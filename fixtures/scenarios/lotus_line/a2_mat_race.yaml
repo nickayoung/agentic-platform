@@ -9,7 +9,7 @@ given:
   sessions:
     - { series: ps_vinyasa_0700, date: "2027-03-09", fill: 0 }
 when:
-  - concurrent:            # both submitted within 50 ms; run with gate on and with gate off
+  - concurrent:            # both submitted within 50 ms; run with alarms delivered and with alarms dropped
       - hold: { customer: amy, session: ps_vinyasa_0700@2027-03-09, place: mat_12, as: hold_a }
       - hold: { customer: ben, session: ps_vinyasa_0700@2027-03-09, place: mat_12, as: hold_b }
 then:

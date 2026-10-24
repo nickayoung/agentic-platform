@@ -1,0 +1,25 @@
+{
+  "name": "@kairos/sync",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kairos/core": "workspace:*",
+    "@kairos/db": "workspace:*",
+    "@kairos/errors": "workspace:*",
+    "@kairos/scheduler": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.7",
+    "@cloudflare/workers-types": "5.20261024.1",
+    "@types/node": "^22.20.5",
+    "vitest": "4.1.12"
+  }
+}

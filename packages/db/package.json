@@ -1,0 +1,24 @@
+{
+  "name": "@kairos/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kairos/errors": "workspace:*",
+    "canonicalize": "5.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.7",
+    "@cloudflare/workers-types": "5.20261024.1",
+    "@types/node": "^22.20.5",
+    "fast-check": "4.10.2",
+    "vitest": "4.1.12"
+  }
+}

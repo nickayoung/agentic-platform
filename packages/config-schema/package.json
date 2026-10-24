@@ -1,0 +1,19 @@
+{
+  "name": "@kairos/config-schema",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "canonicalize": "5.1.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.7",
+    "@kairos/expr": "workspace:*"
+  }
+}

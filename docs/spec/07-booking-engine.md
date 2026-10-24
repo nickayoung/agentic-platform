@@ -1,6 +1,6 @@
 # 7. Booking engine
 
-`@kairos/engine` is a TypeScript package. It runs in the `kairos-core` edge function, and in the batch worker for simulations. Given (compiled config, data read through a storage port, request, clock), it always returns the same decision. All writes go through **guarded batches** (§12.2). It never calls an LLM.
+`@kairos/engine` is a TypeScript package. It runs inside the `TenantCore` Durable Object, and in `SimulationRun` objects for simulations (§19.10). Given (compiled config, data read through a storage port, request, clock), it always returns the same decision. All writes go through **batches**, each one SQLite transaction (§12.2). It never calls an LLM.
 
 ## 7.1 Responsibilities
 
@@ -84,10 +84,12 @@ The **quote** contains `{ payment, unit, amount, entitlement_id?, price?, terms:
    - The primary key on `place_claim (session_id, place_id)` allows one claim per place.
    - The `place.reserved_for` guard protects places held for the waitlist.
    - CHECK constraints protect balances and counters.
-   - Each operation runs as one guarded batch in which every assert is a scalar subquery (§12.2).
-2. **SessionGate**, one per class, is a per-object store instance. It runs that class's commands one at a time in arrival order (hold, confirm, cancel, waitlist, promotion, timers), caches free counts, and sets an alarm at the earliest hold expiry. If the gate is unreachable, edge functions send batches directly to the database. Correctness is unchanged; only first-come-first-served fairness is lost.
+   - Each operation runs as one batch: a single transaction in which the checks run as code and throw to roll back (§12.2).
+2. **SessionGate**, one per class, is an in-memory queue inside `TenantCore` (§19.3). It runs that class's commands one at a time in arrival order, including across their `await`s (hold, confirm, cancel, waitlist, promotion, timers), and caches free counts. Hold expiries are woken by the `TenantCore` scheduler alarm (§19.5). Correctness doesn't depend on the gate; it only adds first-come ordering across `await`s.
 
 ### 7.5.2 Hold batch
+
+One transaction (§12.2). The SQL runs through `ctx.storage.sql.exec`; the checks are code that throw and roll back.
 
 ```sql
 -- 1. claim the mat unless a live claim exists (an expired hold is overwritten)
@@ -96,18 +98,18 @@ VALUES (:session, :place, 'hold', :hold_id, :customer, :now + :ttl)
 ON CONFLICT (session_id, place_id) DO UPDATE
   SET kind='hold', holder_id=excluded.holder_id, customer_id=excluded.customer_id, expires_at=excluded.expires_at
   WHERE place_claim.kind = 'hold' AND place_claim.expires_at <= :now;
--- 2. assert: we own it (scalar subquery → exactly one row inserted, never zero)
-INSERT INTO batch_assert (ok) VALUES (
-  (SELECT holder_id FROM place_claim WHERE session_id = :session AND place_id = :place) = :hold_id);
--- 3. assert: mat is usable by this member (not disabled; waitlist reservation honoured)
-INSERT INTO batch_assert (ok) VALUES ((SELECT p.disabled = 0 AND (p.reserved_for IS NULL OR EXISTS (
+-- 2. check: we own it. Read back the holder; if it isn't :hold_id → throw PlaceTaken
+SELECT holder_id FROM place_claim WHERE session_id = :session AND place_id = :place;
+-- 3. check: mat is usable by this member (not disabled; waitlist reservation honoured); false → throw PlaceTaken
+SELECT p.disabled = 0 AND (p.reserved_for IS NULL OR EXISTS (
     SELECT 1 FROM offer o WHERE o.session_id = :session AND o.kind = 'place'
       AND o.state IN ('sent','accepted') AND o.hold_id = :hold_id
-      AND o.customer_id = :customer AND o.expires_at > :now))
-  FROM place p WHERE p.id = :place));
+      AND o.customer_id = :customer AND o.expires_at > :now)) AS ok
+  FROM place p WHERE p.id = :place;   -- no row also counts as false
 INSERT INTO hold (...) VALUES (...); INSERT INTO decision (...) VALUES (...); INSERT INTO audit (...) VALUES (...);
-DELETE FROM batch_assert;
 ```
+
+The scheduler then re-arms the alarm if this hold expires before the current alarm time (§19.5).
 
 **Hold TTL.** A hold lasts `tenant.hold_ttl`. A hold made under a place offer expires at `min(now + hold_ttl, offer.expires_at + 5m)`, so a member who accepts at the last minute still has time to pay.
 
@@ -115,28 +117,28 @@ DELETE FROM batch_assert;
 
 Two members tap **Mat 12** in Park Slope Studio 1 for Tue 07:00 Vinyasa within the same 50 ms. Mat 12 is in row 2 and is a wall mat, so it is in the `general` partition.
 
-1. Both requests pass checks 1–8 at the edge.
-2. The SessionGate orders them: A first (arrived 3 ms earlier), then B.
-3. A's batch inserts the place claim and the asserts pass. A gets `201 { hold_id, expires_at: now+5m, quote }`.
-4. B's batch: the upsert's `WHERE` is false, so no row changes. Assert 2 evaluates to false, the CHECK fails, and the whole batch rolls back. B gets `409 PLACE_TAKEN` with alternatives: free places in B's eligible partitions with Mat 12's attributes (`by_wall: true`, `front_row: false`), nearest first by grid distance, for example `[Mat 18, Mat 24]`, plus `free_count`.
-5. **Gate down:** SQLite runs write batches one at a time, so the second batch fails the same assert. Same outcome.
-6. **A abandons:** at expiry the gate alarm deletes A's place claim (guarded on holder and expiry), marks the hold `expired`, and emits `place.released`. That release goes through the waitlist rules in §7.7. If the alarm is lost, the next claimant's upsert overwrites the expired row, and the one-minute sweep (§12.4) cleans up.
+1. Both requests pass checks 1–8 (§7.4).
+2. Both reach the tenant's `TenantCore` object. The SessionGate queues them in arrival order: A first (arrived 3 ms earlier), then B.
+3. A's transaction inserts the place claim and the checks pass. A gets `201 { hold_id, expires_at: now+5m, quote }`.
+4. B's transaction: the upsert's `WHERE` is false, so no row changes. Check 2 reads holder A, throws `PlaceTaken`, and the whole transaction rolls back. B gets `409 PLACE_TAKEN` with alternatives: free places in B's eligible partitions with Mat 12's attributes (`by_wall: true`, `front_row: false`), nearest first by grid distance, for example `[Mat 18, Mat 24]`, plus `free_count`.
+5. **Without the gate's ordering** (for example two holds arriving in one event-loop turn): the object still runs one transaction at a time, so the second one fails the same check. Same outcome.
+6. **A abandons:** at expiry the scheduler alarm deletes A's place claim (checked on holder and expiry), marks the hold `expired`, and emits `place.released`. That release goes through the waitlist rules in §7.7. If the alarm is late or lost, the next claimant's upsert overwrites the expired row, and the next scheduler tick (≤ 60 s) or the 5-minute backstop (§19.5) cleans up.
 7. **Expiry during payment:** A confirms after expiry, so the guard fails. The engine tries **one** transparent re-hold of the same mat. If that also fails, A gets `409 HOLD_EXPIRED` with alternatives, and the payment authorisation is voided through an outbox job keyed by the hold ID.
 
-Edge clocks are assumed to be within ±1 s (A-12). Holds last minutes, and the uniqueness guarantee depends only on commit order, not on clocks.
+Server clocks are assumed to be within ±1 s (A-12). Holds last minutes, and the uniqueness guarantee depends only on commit order, not on clocks.
 
 ### 7.5.4 Confirm batch
 
 One batch, in this order:
 
-1. Convert the claim: `UPDATE place_claim SET kind='booking', holder_id=:b, expires_at=NULL WHERE session_id=? AND place_id=? AND kind='hold' AND holder_id=:h AND expires_at > :now`, then the assert `INSERT INTO batch_assert(ok) VALUES ((SELECT count(*) FROM place_claim WHERE session_id=? AND place_id=? AND holder_id=:b) = 1)`.
+1. Convert the claim: `UPDATE place_claim SET kind='booking', holder_id=:b, expires_at=NULL WHERE session_id=? AND place_id=? AND kind='hold' AND holder_id=:h AND expires_at > :now`. Check that exactly one row changed (`rowsWritten`); otherwise throw `HoldExpired`.
 2. Insert the booking with its terms snapshot.
-3. Units: `UPDATE entitlement_balance SET balance = balance - :n, last_batch = :batch WHERE …`. If the balance is short, the CHECK aborts the batch. Then assert `last_batch = :batch`, and insert the `reserve` ledger row.
+3. Units: `UPDATE entitlement_balance SET balance = balance - :n, version = version + 1 WHERE …`. If the balance is short, the CHECK aborts the transaction (`INSUFFICIENT_UNITS`). Check that one row changed, then insert the `reserve` ledger row.
 4. Upsert the limit counters (CHECK `count <= max`).
 5. Update `booked_count`.
 6. Write the outbox rows (`booking.confirmed`, payment capture) and the audit row.
 
-**Price payments.** The client completes the processor's hosted payment step, which produces an authorisation. Kairos never sees card data. The engine checks the authorised amount through the gateway before the batch runs. Capture is an outbox job that runs after commit. If capture fails for good, the booking is cancelled as a studio cancel, the place is released, and the member is notified.
+**Price payments.** The client completes the processor's hosted payment step, which produces an authorisation. Kairos never sees card data. The engine checks the authorised amount through the gateway **before** the batch runs, while the SessionGate holds this session's queue. The confirm batch then re-reads the hold and re-runs every check (§19.2). Capture is an outbox job that runs after commit. If capture fails for good, the booking is cancelled as a studio cancel, the place is released, and the member is notified.
 
 ## 7.6 Cancellation, late cancellation, no-show
 
@@ -167,15 +169,15 @@ One batch, in this order:
 - the current mode is not `closed`;
 - checks 3–8 pass. If `require_entitlement` is set, payment only has to be possible (nothing is reserved).
 
-`position = max + 1`, assigned in the gate batch. The body may carry `preferred_place_ids`, `auto_charge_consent` and `payment_method_ref`.
+`position = max + 1`, assigned in the join batch. The body may carry `preferred_place_ids`, `auto_charge_consent` and `payment_method_ref`.
 
-**Priority over new bookings (D-27).** Any batch that frees a place (cancellation, hold expiry, partition release, capacity increase, re-seat) checks whether the session has `waiting` entries and the mode is not `closed`. If so, and at least one waiting entry passes the place's partition `eligible_if` (evaluated in the read phase, D-59), the same batch sets `place.reserved_for = 'waitlist'`. A front-row place freed before its release time is therefore not reserved for a waitlist of non-unlimited members. The hold SQL (§7.5.2, assert 3) then refuses that place to anyone who doesn't hold an active place offer. This is enforced in the database, so it holds even when the gate is down.
+**Priority over new bookings (D-27).** Any batch that frees a place (cancellation, hold expiry, partition release, capacity increase, re-seat) checks whether the session has `waiting` entries and the mode is not `closed`. If so, and at least one waiting entry passes the place's partition `eligible_if` (evaluated in the read phase, D-59), the same batch sets `place.reserved_for = 'waitlist'`. A front-row place freed before its release time is therefore not reserved for a waitlist of non-unlimited members. The hold SQL (§7.5.2, assert 3) then refuses that place to anyone who doesn't hold an active place offer. This is enforced inside the transaction, so it holds whatever order requests arrive in.
 
-**Freeing a place.** Every path that frees a place goes through one routine, `release_place(session, place)`, inside the batch that frees it. That covers cancellation, hold expiry (alarm **or** the 1-minute sweep, §12.4), partition release, capacity increase and re-seat. The routine sets `reserved_for` (D-27) and emits `place.released`.
+**Freeing a place.** Every path that frees a place goes through one routine, `release_place(session, place)`, inside the batch that frees it. That covers cancellation, hold expiry (the scheduler alarm or its ≤ 60 s tick, §12.4, §19.5), partition release, capacity increase and re-seat. The routine sets `reserved_for` and `reserved_at` (D-27) and emits `place.released`.
 
 **Promotion.**
 - The gate runs promotion as its very next command after any batch that sets `reserved_for`.
-- **Fallback:** a promotion sweep runs every minute. For any place with `reserved_for='waitlist'` set more than 30 s ago, it runs the same promotion directly against the database, guarded by the same asserts. A gate outage therefore delays promotion by at most about 90 s; it never strands a mat.
+- **Fallback:** the scheduler wakes at `reserved_at + 30 s` (§19.5). For any place still reserved then, it runs the same promotion with the same checks. A late or lost alarm therefore delays promotion by at most about 90 s (30 s plus one ≤ 60 s tick); it never strands a mat.
 
 ```
 mode ← first schedule entry whose `until` instant is still in the future; else closed
@@ -185,7 +187,9 @@ auto_promote:
     if none: continue
     result ← pipeline steps 3, 5–10 for entry.customer with that place, channel 'waitlist' (step 4 skipped)
     payment: units → reserve; price → only if auto_charge_consent && payment_method_ref
-             (charge via gateway with idempotency key = entry id; a declined charge → skipped, PAYMENT_FAILED);
+             (charge via gateway with idempotency key = entry id, made BETWEEN two batches: the place stays
+              reserved while the charge is in flight, and the promotion batch re-reads and re-checks, §19.2;
+              a declined charge → skipped, PAYMENT_FAILED);
              otherwise treat as not allowed → offer instead
     allowed → one batch: booking confirmed (booked_via=waitlist), place.reserved_for=NULL, entry → promoted,
               emit booking.confirmed; stop
@@ -195,7 +199,7 @@ offer_all:
   every waiting entry → offered; create a place Offer per entry (expires_at = now + offer_ttl); emit waitlist.offered
   place stays reserved for offered members.
   POST /offers/{id}/accept (place) runs ONE batch: offer → accepted, hold created on a reserved place
-    (assert 3 passes because o.hold_id = the new hold), returns hold_id; the member then confirms (POST /bookings).
+    (check 3 passes because o.hold_id = the new hold), returns hold_id; the member then confirms (POST /bookings).
   the first accepted offer to confirm wins; booking the place clears its reserved_for.
   other open offers stay valid while reserved places remain; when none remain they get 409 SESSION_FULL on accept.
   when all offers expire or are declined: entries → waiting (if session still full), reserved_for cleared
@@ -237,7 +241,7 @@ A booking that needs approval is created as `pending_approval`. The place is cla
 | `OUTSIDE_AVAILABILITY` / `SKILL_MISSING` / `ROLE_MISSING` | Person rules | — |
 | `REST_VIOLATION` / `MAX_HOURS` / `MAX_ASSIGNMENTS` / `TRANSFER_TIME` / `CONSECUTIVE_DAYS` | Person rules | — |
 | `MIRROR_STALE` | Mirror data too old for a staff write (§18.6) | — |
-| `STALE_VERSION` | Optimistic guard still failing after retries | "Please try again." |
+| `STALE_VERSION` | `If-Match` or a proposal snapshot no longer matches, and re-validation failed (§12.2) | "Please try again." |
 
 ## 7.10 Time zones and DST
 
@@ -269,7 +273,7 @@ They are measured by synthetic probes every minute from three regions, per tenan
 While `bookings` (or `members`, for debits) is not `owner`:
 
 1. **Local pre-checks:** actor, member state, write freeze, mirrored capacity.
-2. **Write-through:** the engine calls the outside system through the gateway with idempotency key = hold or booking ID. The outside system's answer is final. A success writes the mirror row (`source = mirror`). A rejection is mapped to a Kairos reason code, or to `DOMAIN_NOT_OWNED` if it has no mapping.
+2. **Write-through:** the engine calls the outside system through the gateway with idempotency key = hold or booking ID. The call is made outside any transaction; the pre-checks run in their own read, and the result is written in a new batch (§19.2). The outside system's answer is final. A success writes the mirror row (`source = mirror`). A rejection is mapped to a Kairos reason code, or to `DOMAIN_NOT_OWNED` if it has no mapping.
 3. **Shadow mode** also runs the full pipeline first and logs a `ShadowDisagreement` if the outcomes differ.
 4. **Mat holds in mirror mode:** if the outside system supports reservations, they are used. Otherwise Kairos keeps an advisory local hold (Q-01).
 5. **Outside outage:**

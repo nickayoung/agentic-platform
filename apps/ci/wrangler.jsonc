@@ -1,0 +1,18 @@
+// kairos-ci: CI on Cloudflare (Workflows + Containers + Artifacts + R2). See src/index.ts.
+// Secret: CI_TRIGGER_TOKEN (`wrangler secret put CI_TRIGGER_TOKEN`) for POST /runs.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "kairos-ci",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": { "REPO": "agentic-platform", "WATCH_BRANCHES": "main,claude/clever-hamilton-rgd6rq" },
+  "triggers": { "crons": ["*/2 * * * *"] },
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "kairos" }],
+  "workflows": [{ "name": "kairos-ci", "binding": "CI", "class_name": "CiWorkflow" }],
+  "r2_buckets": [{ "binding": "CI_RESULTS", "bucket_name": "kairos-ci" }],
+  "containers": [{ "class_name": "CiRunner", "image": "./runner/Dockerfile", "max_instances": 4, "instance_type": "standard-2" }],
+  "durable_objects": { "bindings": [{ "name": "CI_RUNNER", "class_name": "CiRunner" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CiRunner"] }]
+}

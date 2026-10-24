@@ -54,26 +54,34 @@ After every step the harness asserts:
 | Every saga is `done`, `parked` (with a task) or resumable; no saga step applied twice | C6 |
 | Replaying a request with the same config, snapshot and clock gives an identical trace | Principle 1 |
 
-### Assert-pattern tests (F-01)
+### Transaction tests (F-01, §12.2)
 
-For every guarded statement in `packages/db`, a test runs the batch twice:
-1. **Guard holds.** Expect a commit.
-2. **Guard broken by a concurrent write** that is interleaved before it. Expect an abort.
+For every check in `packages/db` and `packages/engine`, a test runs the batch twice:
+1. **Check holds.** Expect a commit.
+2. **Check broken** by a write committed just before it. Expect a rollback that leaves no row changed, and the check's reason code.
 
-One test is mandatory: a concurrent version bump between the read and the write. The `last_batch` assert must abort the batch. The CI lint (§12.2) forbids the `INSERT … SELECT` assert form.
+Mandatory tests:
+- A transaction body that suspends asynchronously fails with a defect and rolls back (§19.11).
+- A two-part command whose state changes during its `await` re-decides in its commit batch, and never commits on the stale read (§19.2).
+- A proposal whose `resource_day` versions moved re-validates before it applies (§8.5).
+- Every constraint violation maps to the same reason code as its matching check.
+
+The CI lint (§19.2) rejects `await`, `Gateway` and `Rpc` inside a transaction body.
 
 ### Concurrency tests
 
+All concurrency tests run on `workerd` with real Durable Objects (§19.16). One transaction can't interleave with another, so "interleaved" below means at every **`await` boundary** and every alarm delivery point.
+
 | Scenario | Setup | Expected result |
 |---|---|---|
-| Mat race | 200 concurrent holds on the same mat; gate on, then gate off | Exactly 1 succeeds; every other request gets `PLACE_TAKEN` with alternatives |
+| Mat race | 200 concurrent holds on the same mat; alarms delivered, then alarms dropped | Exactly 1 succeeds; every other request gets `PLACE_TAKEN` with alternatives |
 | Pooled rush | 500 requests for 28 places | Exactly 28 holds |
-| Waitlist reservation | A cancellation with waiting entries, and a new member's hold, interleaved at every statement boundary | The new member never gets the place |
-| Cross-domain | A desk-shift publish and a class-assignment write for the same person and time, interleaved at every boundary | Exactly one commits. If the class assignment came from the mirror, it is stored as `conflicted` |
-| Rest-rule race | Two assignments that each pass `min_rest` alone but together break it | One aborts with `STALE_VERSION` and then fails validation |
-| Hold timing | Alarm lost; alarm duplicated; confirm racing the expiry | Each case resolves with no double claim |
+| Waitlist reservation | A cancellation with waiting entries, and a new member's hold, interleaved at every `await` boundary | The new member never gets the place |
+| Cross-domain | A desk-shift publish and a class-assignment write for the same person and time, interleaved at every `await` boundary | Exactly one commits. If the class assignment came from the mirror, it is stored as `conflicted` |
+| Rest-rule race | Two assignments that each pass `min_rest` alone but together break it: direct writes, then two proposals built from the same snapshot | Direct writes: the second fails validation (`REST_VIOLATION`). Proposals: the second sees moved `resource_day` versions, re-validates, and fails |
+| Hold timing | Alarm lost; alarm duplicated; alarm late by 60 s; confirm racing the expiry; object restarted between hold and expiry | Each case resolves with no double claim; a lost alarm is recovered by the backstop |
 | Two managers | Two managers apply proposals that touch the same person-days | The second one re-validates |
-| Substitute double accept | Two of three open substitute offers accepted within 5 ms, interleaved at every statement boundary | Exactly one `accepted` offer and one proposal; the other gets `409 OFFER_FILLED` |
+| Substitute double accept | Two of three open substitute offers accepted within 5 ms, interleaved at every `await` boundary | Exactly one `accepted` offer and one proposal; the other gets `409 OFFER_FILLED` |
 | Retime vs hold | A session retime racing a member's confirm of an existing hold | Either the confirm commits first (and the booking is moved with the session), or the confirm gets `SESSION_CHANGED` |
 
 ### DST matrix
@@ -166,11 +174,12 @@ then:
 
 | Key | Meaning |
 |---|---|
-| `config`, `domain_modes`, `clock`, `gate`, `outside` | The config fixture; the mode of each domain; the virtual start time; `unavailable` to simulate a SessionGate outage; `outside: { <system>: available \| unavailable \| rejects }` for gateway behaviour |
+| `config`, `domain_modes`, `clock`, `alarms`, `outside` | The config fixture; the mode of each domain; the virtual start time; `alarms: dropped` to disable the scheduler alarm so that only the next command or the 5-minute backstop makes progress (§19.16); `outside: { <system>: available \| unavailable \| rejects }` for gateway behaviour |
 | `given` | Seed data: `customers` (`entitlements`, `pays`), `people` (`roles`, `skills`, `email`), `sessions` (`series@date`, `fill`, `bookings`, `waitlist`, `assignments`, `payments`), `person_mappings` |
 | `when` / `steps` | Actions: `hold`, `confirm`, `cancel`, `send_offer`, `accept_offer`, `approve_proposal`, `assign`, `solve`, `time_off`, `mirror_event`, `advance_to`, `at` (run the step at a time), `concurrent` (submit the listed steps within 50 ms), `as` (name a result), `expect` (expected status or code) |
 | `then` | Assertions: `booking(s)`, `balance`, `ledger`, `place`, `place_claims`, `claim`, `session`, `assignment`, `offer(s)`, `proposal`, `waitlist_entry`, `event`, `outbox` (`none_matching` uses a glob), `drift`, `writes` (`none_except`), `result`, `exactly_one_of`, `other_result`, `solution`, `within` (seconds) |
-| `variants` | Re-run with `given_override`, `clock`, `domain_modes`, `gate` and extra `steps`, checked against the variant's own `then` |
+| `restart` | `after_step_<n>`: restart the `TenantCore` object right after step *n* commits, losing its in-memory state (SessionGate queues, caches) but keeping storage and the alarm |
+| `variants` | Re-run with `given_override`, `clock`, `domain_modes`, `alarms`, `restart` and extra `steps`, checked against the variant's own `then` |
 
 Required scenario suites:
 - **Acceptance (A.2–A.5)**, committed in `fixtures/scenarios/lotus_line/a2_…a5_*.yaml`: mat race; late cancel and waitlist with all variants (including price-paid canceller and front row before release); sick call (filled / became busy / accepted late / double accept / no substitute → studio cancel and refunds in owner mode / Phase 3 push to BookingVendor / push fails); mirror classes + owned desk shifts (all three orders, the after-the-class desk shift, and the mode guard).
@@ -188,8 +197,9 @@ Required scenario suites:
 
 - **Contract tests.** The generated clients (website, desk app, portal, phone apps) run against preview. Shared services are stubbed from their published contracts, and the stubs are verified with consumer-driven contracts.
 - **Sync adapters.** Replay recorded sandbox traffic from BookingVendor and ShiftTool. Seeded drift must be detected 100 % of the time, including `unmapped_person`.
-- **Load.** Booking-open rush at 300 holds/s on one class for 60 s; timetable reads at 2,000 rps; targets from §7.11.
-- **Chaos.** Every row of §13.8. No invariant may break, and each component must recover within its stated target.
+- **Load.** Booking-open rush at 300 holds/s on one class for 60 s; timetable reads at 2,000 rps with at least 90 % edge-cache hits; targets from §7.11. `TenantCore` stays under 600 requests/s (§19.4).
+- **Chaos.** Every row of §13.8, plus a `TenantCore` restart mid-saga and mid-outbox-delivery. No invariant may break, and each component must recover within its stated target.
+- **Restore.** A point-in-time restore of a preview `TenantCore` (§19.9) is part of each quarterly drill.
 
 ## 14.4 Configuration agent evals
 

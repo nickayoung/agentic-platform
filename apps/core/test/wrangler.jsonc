@@ -1,0 +1,11 @@
+{
+  "name": "kairos-core-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.yaml"], "fallthrough": true }],
+  "vars": { "GATEWAY_URL": "https://gateway.test/v1", "NOTIFY_URL": "https://notify.test/v1", "SERVICE_TOKEN": "svc" },
+  "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "kairos-archive-test" }],
+  "durable_objects": { "bindings": [{ "name": "TENANT_CORE", "class_name": "TenantCore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCore"] }]
+}

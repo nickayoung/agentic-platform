@@ -12,7 +12,7 @@ The rostering engine proposes **teacher assignments for classes** and **desk sta
 | Runtime | C++ core, Python wheel | JVM |
 | Fit for a small TypeScript team | Thin Python worker reads a JSON IR; all logic stays in TypeScript | JVM service, with rules written in Java |
 
-The deciding factor is infeasibility reporting: the brief requires naming the conflicting constraints, and CP-SAT does this directly. Neither solver runs at the edge, so the solver runs in a stateless container worker (A-10).
+The deciding factor is infeasibility reporting: the brief requires naming the conflicting constraints, and CP-SAT does this directly. Neither solver runs on Workers, so the solver runs in a stateless Cloudflare Container (A-10, §19.10).
 
 ## 8.2 Architecture
 
@@ -77,20 +77,18 @@ The objective minimises the integer sum of soft costs. Solves are deterministic 
 - occupancy;
 - `min_rest`, `transfer_time`, `max_hours`, `max_assignments`, `max_consecutive_days` and hard `assignment_expr`, against the person's claims in every domain and from every source.
 
-**Race safety.** Rules that depend on neighbouring claims are protected by **per-person-day version rows**. The commit batch includes, for every local day the rule windows touch:
+**Race safety.** A direct write (a manager edit, a swap, a vacate) reads the person's claims and runs the validator inside the same transaction as the write, so nothing can change in between (§12.2). A write built from an **older snapshot** (a solver proposal, a substitute proposal, a proposal edited over minutes) is protected by **per-person-day version rows**. Every batch that changes a person's claims bumps the version of each local day the rule windows touch:
 
 ```sql
-UPDATE resource_day SET version = version + 1, last_batch = :batch_id
- WHERE resource_id = :p AND day = :d AND version = :v_read;
-INSERT INTO batch_assert (ok) VALUES (
-  (SELECT last_batch FROM resource_day WHERE resource_id = :p AND day = :d) = :batch_id);
+INSERT INTO resource_day (resource_id, day, version) VALUES (:p, :d, 1)
+ON CONFLICT (resource_id, day) DO UPDATE SET version = version + 1;
 ```
 
-A `resource_day` row is created on first use (`INSERT … ON CONFLICT DO NOTHING` in the read phase). If a concurrent batch has bumped the version, this batch's UPDATE matches no row, `last_batch` stays different, and the batch aborts. The engine then re-reads, re-validates, and retries up to 3 times before failing with `STALE_VERSION`.
+A proposal records the versions it was built against. At commit, if any of them has moved, the engine re-runs the validator against the current state inside the commit transaction. It applies if the validator passes, and fails with reasons (or `STALE_VERSION`) if not. No retries are needed.
 
 A solver result that fails the validator is a **bug**: it is not committed, and an alert is raised.
 
-**Two managers editing the same roster.** Each proposal has a `version`, and edits require `If-Match`. Two proposals that touch the same person-days can both be *created*. When the second one is *applied*, its `resource_day` guards fail, it re-validates against the first one's committed state, and it either applies or fails with reasons.
+**Two managers editing the same roster.** Each proposal has a `version`, and edits require `If-Match`. Two proposals that touch the same person-days can both be *created*. When the second one is *applied*, its recorded `resource_day` versions no longer match, so it re-validates against the first one's committed state, and it either applies or fails with reasons.
 
 ## 8.6 Instructor sick call
 
@@ -115,7 +113,7 @@ The trigger is a `TimeOff` with `reason: sick, immediate: true`. It can come fro
 
 A roster commit is a **saga**:
 
-1. Group the ops by person. Each person's ops go in one guarded batch: `resource_day` guards, occupancy changes and assignments.
+1. Group the ops by person. Each person's ops go in one batch: `resource_day` version check and bump, re-validation, occupancy changes and assignments.
 2. Apply the batches in person-ID order.
 3. If any batch fails, compensate the batches already applied (release their new claims, restore their old assignments). The proposal goes to `failed` and lists the conflicting person-days.
 

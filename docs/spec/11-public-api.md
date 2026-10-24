@@ -8,7 +8,7 @@ The API is REST, not GraphQL, for five reasons:
 - **Precise writes.** Hold, confirm, cancel and approve are commands that need idempotency keys, precise error codes and decision traces.
 - **Agent tooling.** Each operation is one typed agent tool with its own allowlist entry.
 - **Bounded cost.** Query cost is bounded on single-writer SQLite.
-- **Generated clients.** Zod → OpenAPI → TypeScript clients for the website, desk app, portal and the native apps.
+- **Generated clients.** Zod route definitions (`@hono/zod-openapi`) in `packages/contracts` → OpenAPI 3.1 → clients: `openapi-typescript` + `openapi-fetch` for TypeScript (website, desk app, portal, Kairos console) and generated clients for the native apps (§19.11).
 
 `include=` expansions cover the common joins.
 
@@ -161,7 +161,7 @@ Idempotency-Key: 7c1e…
 
 - Each tenant has one database per environment, resolved through the control-plane registry before any query runs.
 - Tokens carry `tid` and `env`.
-- Caches, per-object stores and logs are keyed or tagged by tenant and environment (§13.1).
+- Caches, Durable Object names and logs are keyed or tagged by tenant and environment (§13.1, §19.1).
 
 ## 11.6 Confirmations
 

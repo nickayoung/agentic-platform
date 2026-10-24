@@ -1,6 +1,6 @@
 # 4. Configuration schema
 
-The config document is one JSON object per tenant and environment. It is authored and shown as YAML, parsed as **YAML 1.2 core schema**, and stored as canonical JSON (RFC 8785). The TypeScript below is normative. It is implemented once as Zod schemas in `packages/config-schema`. JSON Schema (for agent tools) and the OpenAPI components are generated from those Zod schemas. No field is named after a YAML 1.1 boolean word (`on`, `off`, `yes`, `no`).
+The config document is one JSON object per tenant and environment. It is authored and shown as YAML, parsed as **YAML 1.2 core schema**, and stored as canonical JSON (RFC 8785). The TypeScript below is normative. It is implemented once as Zod 4 schemas in `packages/config-schema` (§19.11). JSON Schema (for agent tools) and the OpenAPI components are generated from those schemas. No field is named after a YAML 1.1 boolean word (`on`, `off`, `yes`, `no`).
 
 ## 4.1 Document structure
 

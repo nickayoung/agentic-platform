@@ -9,7 +9,7 @@ state change batch ──(same batch)──▶ domain_event (id, name, subject, 
         dispatcher (after commit, ordered per subject) → match triggers (event + where)
         → workflow_run (UNIQUE run_key) → condition → immediate actions (same batch, outbox for external)
                                                     → delayed actions → scheduled_action (fire_at)
-        timer driver (per-tenant alarm + 1-minute sweep) → claim → recheck → execute
+        timer driver (TenantCore scheduler alarm, ≤ 60 s tick) → claim → recheck → execute
 ```
 
 Delivery is at least once. Effects happen exactly once, enforced by idempotency keys (§9.5). Events for one subject are processed in commit order.
@@ -129,10 +129,10 @@ outbox idempotency key = action_key
 
 - **Duplicates are no-ops.** `run_key`, `action_key` and the outbox key are `UNIQUE` and inserted with `ON CONFLICT DO NOTHING`. The notification service and the gateway must also deduplicate by `Idempotency-Key` for ≥ 7 days (§18.3).
 - **Timer driver.**
-  - A per-tenant TimerObject holds an alarm set to the earliest `fire_at`.
+  - The tenant's `TenantCore` scheduler sets its single alarm to the earliest due time across all its work, `scheduled_action.fire_at` included, and wakes at least once a minute while work is pending (§19.5).
   - When the alarm fires, it claims up to 100 due actions with a 60 s lease.
-  - For each action, it re-checks the condition, executes the effect, and marks the action done, all in one batch.
-  - A sweep runs every minute and picks up expired leases and anything more than 60 s overdue.
+  - For each action, it re-checks the condition, executes the effect, and marks the action done, all in one batch. Effects that leave Kairos are outbox rows, delivered after commit (§19.6).
+  - The same tick picks up expired leases and anything overdue. A 5-minute Cron Trigger backstop re-arms any tenant whose alarm is missing.
   - Target: p95 within 15 s of `fire_at`, p99 within 60 s.
 - **Failures.** Retries happen at 1 m, 5 m, 30 m, 2 h and 12 h. After that the action is marked `dead` and a manager-inbox task is created.
 - **Config publish.** Pending actions of removed workflows are cancelled. Pending actions of changed workflows are cancelled and re-planned under the new hash.
@@ -148,8 +148,8 @@ outbox idempotency key = action_key
 | Time | What happens | Batch contents |
 |---|---|---|
 | 08:00:00 | Cara cancels. 08:00 ≥ 06:30, so it is **late** | Booking → `late_cancelled`; place claim deleted; counters −1; `booked_count` 35; scheduled action `penalty:bkg_cara @ 18:30`. The waitlist has waiting entries and the mode is not closed, so **`place.reserved_for = 'waitlist'`** is set in the same batch. The front-row partition was released to `general` at Mon 18:30, so Mat 3 is relabelled `general`. Events `booking.late_cancelled`, `place.released{cancel}` |
-| 08:00:00.01 | A new member, Fay, tries to hold Mat 3 | Assert 3 (§7.5.2) fails because Mat 3 is reserved for the waitlist and Fay has no offer → `409 PLACE_TAKEN`. Fay can join the waitlist |
-| 08:00:00.05 | SessionGate runs promotion. Mode at 08:00 is **auto_promote** (16:30 is still in the future) | — |
+| 08:00:00.01 | A new member, Fay, tries to hold Mat 3 | Check 3 (§7.5.2) fails because Mat 3 is reserved for the waitlist and Fay has no offer → `409 PLACE_TAKEN`. Fay can join the waitlist |
+| 08:00:00.05 | The SessionGate runs promotion as the session's next command. Mode at 08:00 is **auto_promote** (16:30 is still in the future) | — |
 | 08:00:00.08 | Dana (#1): Mat 3 is free and reserved; she passes steps 3 and 5–10; pack_10 covers her (3 ≥ 1) | Place claim Mat 3 → `bkg_dana`; booking `confirmed`, `booked_via: waitlist`; balance 3→2, `reserve −1`; `reserved_for` cleared; entry → `promoted`; `booked_count` 36 |
 | 08:00:01 | `promoted_notice` workflow | SMS to Dana via the notification service ("You're in: Mat 3, Tue 18:30") |
 | 18:30:00 | Penalty for Cara: `place_refilled` is true (Mat 3 has Dana's confirmed booking) | No fee job. Cara's membership is unlimited, so nothing is forfeited. Event `booking.penalty_assessed{waived: true}` |
