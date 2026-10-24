@@ -34,9 +34,10 @@ kairos-core (edge, TS)                                     solver worker (contai
 ## 8.3 IR and model mapping
 
 **IR contents.**
-- **Tasks**: teacher slots of classes in scope, plus candidate desk-shift copies (one per template × allowed start × day × studio × lane up to coverage target).
+- **Tasks**: teacher slots of classes in scope, plus candidate desk-shift copies (one per template × matching `starts` entry × day × studio × lane, up to the coverage target). Only candidates that fit inside the desk's availability are generated (§4.6).
 - **Eligible people per task**: selector and skills, availability, time off, studio, and person `state`.
-- **`fixed_busy`** intervals: every existing claim outside the scope, including **mirrored class assignments**.
+- **`fixed_busy`** intervals: every confirmed claim of each person outside the solve scope, in every domain and from every source, including **mirrored class assignments**. These intervals count towards `max_hours`, `max_assignments` and `max_consecutive_days` when the rule's `counts` is `all_work`, which is the default (§4.11).
+- **`unmapped_blocks`**: for every mirrored class in `needs_mapping` state, the interval `[occ_start − max transfer time, occ_end + max transfer time]`. It is added as `fixed_busy` to **every** person with the `teacher` role who is eligible for a desk task in that window (§18.5, D-26). The solver therefore never proposes what the validator would refuse.
 - **Coverage segments**, **hard groups** (each with a stable ID that maps back to its constraint key and scope), **soft terms**, `time_limit_s` and `seed`.
 
 **Variables.** A Boolean `x[p,t]` for each task *t* and eligible person *p*, each with an optional interval `[occ_start, occ_end)`.
@@ -103,10 +104,12 @@ The trigger is a `TimeOff` with `reason: sick, immediate: true`. It can come fro
    - When an offer is declined or expires, the next candidate is asked. Candidates are re-fetched before each wave.
 4. **Accept → proposal.** The candidate answers `POST /offers/{id}/accept` (button in the phone app), or replies by SMS. In the SMS case, H3 interprets the text and records an accept on their behalf, with the text attached for the manager. Either way, a `Proposal{assignment_change}` is created and validated at once. All other open offers for the slot are withdrawn.
 5. **Approve → commit.** A manager approves in the portal or desk app, or the proposal auto-approves if the flag `substitute.auto_approve` is on and the candidate passes every *soft* rule too. The commit re-validates (I-27). The assignment becomes `confirmed`, the session `scheduled`, and `assignment.confirmed{reason: substitute}` is emitted, which triggers the `sub_assigned_notice` workflow to members. If the candidate became busy in the meantime (`RESOURCE_CONFLICT`), the proposal goes to `failed` and outreach continues.
-6. **Unapproved proposals** expire at `expires_at`, which defaults to `min(deadline, now + 2h)` (I-28a). Outreach then continues.
-7. **No substitute.** At the hook's deadline, the hook emits `custom.substitute_exhausted`, and the tenant's workflows create a manager task. At `policy.unstaffed.check_at`, if the slot is still empty, the **built-in** unstaffed check (§7.1) cancels the class with `reason: no_staff`. Every booking is cancelled with a full refund and units released (§7.6, studio cancel). The `no_sub_notice` workflow texts members, and waitlist entries expire.
+6. **Unapproved proposals** expire at `expires_at`, which defaults to `min(session.start − 30m, now + 2h)` (I-28a). Outreach then continues.
+7. **No substitute.** At the hook's deadline (T−2h in §4b.1), the hook emits `custom.substitute_exhausted`, and the tenant's workflows create a manager task. At `policy.unstaffed.check_at` (T−90m), if the slot is still empty:
+   - If a **validated `assignment_change` proposal is pending** for the slot, the check is deferred to `min(proposal.expires_at, start − 30m)`, and approvers get an urgent notification. If the proposal is approved before then, the class goes ahead.
+   - Otherwise, or once the deferral runs out, the **built-in** unstaffed check (§7.1) cancels the class with `reason: no_staff`. Every booking is cancelled with a full refund and units released (§7.6, studio cancel). The `no_sub_notice` workflow texts members, and waitlist entries expire.
 8. **Multi-day absence.** If the time off vacates more than 3 slots, or slots on more than 1 day, a `repair` solve runs as well. Only the vacated slots are variables, everything else is fixed, and stability has a high weight. The solve returns one coherent multi-slot proposal.
-9. **Mirror mode for classes.** The commit in step 5 is a **write-through** of the teacher change to BookingVendor (§18.4). The mirrored claim is updated from BookingVendor's response. A cancellation in step 7 is also written through.
+9. **Mirror mode for classes (Phases 1–2).** The substitute flow and the unstaffed check need `classes = owner` (§7.13). They ship in Phase 3. While classes are mirrored, a teacher's sick call in Kairos vacates only their **owned desk shifts**. Cover for their classes is arranged in BookingVendor, and the portal shows a link to it (§18.5.1). The teacher's mirrored claim stays in place until BookingVendor changes the class, so the occupancy guard keeps protecting that time.
 
 ## 8.7 Committing a roster
 

@@ -80,6 +80,7 @@ interface TenantSettings {
   fee_ceiling: Money;                    // LOCKED; default 100.00 in tenant currency
   closure_pay_notice: Duration;          // §3.12.2; default "2h"
   closing_notice: Duration;              // notice to members when the tenant closes; default "14d"
+  refund_credit_product: Key;            // pack granted when refund.timely = 'credit' (§4.8)
   environment_guards: { preview_outbound: 'sandbox' | 'record_only' };   // LOCKED
 }
 interface LocationDef {
@@ -134,7 +135,8 @@ interface TemplateDef extends FlagRef {
   tags?: string[];
   duration: Duration;
   scheduling: { mode: 'timetable' }                                 // sessions come from series or one-off creation by staff
-            | { mode: 'rostered'; allowed_starts: LocalTime[] };    // desk shifts, created by a roster solve or a manager
+            | { mode: 'rostered';                                   // desk shifts, created by a roster solve or a manager
+                starts: { at: LocalTime; days?: Weekday[]; locations?: Key[] }[] };   // omitted days/locations = all
   participants: { who: 'customers'; capacity: CapacitySpec; allow_guests?: number }
               | { who: 'none' };
   requirements: RequirementDef[];
@@ -188,6 +190,8 @@ interface CostSpec {
 
 A private class is a one-off session of a template with `{ mode: pooled, places: 1 }`.
 
+**Shift candidates.** A rostered template yields one candidate shift for each matching `starts` entry, day and studio. A candidate is generated **only if** `[start, start + duration)` lies inside the availability of the requirement's `fixed` resource (the front desk) on that day. Since a desk follows its studio's hours (§4.10), shifts never fall outside opening hours. `COVERAGE_UNCOVERABLE` (§6.3) is evaluated against these candidates only.
+
 ## 4.7 Timetable and series edits
 
 ```ts
@@ -234,6 +238,7 @@ interface PolicySetDef {
   check_in?: { opens: Offset; closes: Offset };
   customer_overlap: 'forbid' | 'allow';
   retroactive: 'none' | 'lenient_only';
+  strike_window?: Duration;              // default "90d"; strikes older than this no longer count (§3.5)
 }
 interface Penalty {
   forfeit_units: boolean; fee?: Money; fee_if?: Expr; strikes?: number; waive_if?: Expr;
@@ -241,7 +246,7 @@ interface Penalty {
 }
 interface RefundRules {
   timely: 'full' | 'credit' | 'none';    // a price-paid booking cancelled before free_until
-                                         //   'credit' = grant a 1-credit pack (valid 90 days) instead of money
+                                         //   'credit' = grant one entitlement of tenant.refund_credit_product instead of money
   studio_cancel: 'full';                 // the studio cancels (unstaffed, closure, minimum attendance): always a full refund
 }
 interface BookingLimitDef { key: Key; window: 'day' | 'week' | 'month' | 'upcoming'; max: number;
@@ -304,11 +309,11 @@ interface ConstraintDef extends FlagRef {
   level: 'hard' | 'soft'; weight?: number;          // weight: soft only, 1..1000
   applies_to: { roles?: Key[]; templates?: Key[]; template_tags?: string[]; people_where?: Expr };
   rule:
-    | { type: 'max_hours'; window: 'day' | 'week' | 'rolling_7d'; hours: number }
+    | { type: 'max_hours'; window: 'day' | 'week' | 'rolling_7d'; hours: number; counts?: Counts }
     | { type: 'min_hours'; window: 'week'; hours: number }
     | { type: 'min_rest'; duration: Duration }      // from one claim's occ_end to the next claim's occ_start, buffers included
-    | { type: 'max_consecutive_days'; days: number }
-    | { type: 'max_assignments'; window: 'day' | 'week'; count: number }
+    | { type: 'max_consecutive_days'; days: number; counts?: Counts }
+    | { type: 'max_assignments'; window: 'day' | 'week'; count: number; counts?: Counts }
     | { type: 'transfer_time' }
     | { type: 'fairness'; metric: 'hours' | 'assignments' | 'weekend_assignments' | 'closing_shifts' }
     | { type: 'preferences' } | { type: 'continuity' } | { type: 'stability' }
@@ -320,6 +325,12 @@ interface CoverageDef extends FlagRef {
   level: 'hard' | 'soft'; weight?: number; except_dates?: LocalDate[];
 }
 ```
+
+`type Counts = 'all_work' | 'matching'`, default `all_work`.
+- `applies_to` chooses **which people** the rule applies to.
+- `counts` chooses **which work** is counted. With `all_work`, every confirmed assignment of that person is counted, in every domain (classes, shifts) and from every source (platform, mirror). With `matching`, only assignments of templates matching `applies_to.templates` / `template_tags` are counted.
+
+So `desk_week` in §4b.1 limits a desk worker's teaching plus desk hours to 40.
 
 - **Hard** person rules are enforced by one shared validator (§8.5) on every assignment write, whatever its source: the solver, a manager, a swap, a substitute, or a mirror report.
 - **Soft** rules (fairness, preferences, continuity, stability) are solver objectives only.
@@ -359,9 +370,13 @@ interface AccessDef {
   issuers: { key: Key; audience: 'member' | 'staff'; issuer: string; jwks_url: string;
              subject_claim: string; tenant_claim: string }[];
   role_mappings: { issuer: Key; claim: string; equals: string; grant: PlatformRole; location_claim?: string }[];
+  staff_role_mappings: { issuer: Key; claim: string; equals: string; role: Key }[];   // directory group → config staff role
   default_member_role: 'member';
 }
 ```
+
+- `role_mappings` grant **platform permissions**.
+- `staff_role_mappings` set a person's **config staff roles** (`Resource.roles`, for example `teacher` or `desk_staff`), which selectors and coverage use. They are re-applied on `person.created` and on every directory sync. A manager can add or remove a staff role with `PATCH /resources/{id}`. That override is audited, and it survives syncs until removed.
 
 ## 4.14 Simulation profiles
 

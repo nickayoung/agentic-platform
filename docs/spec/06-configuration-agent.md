@@ -77,13 +77,13 @@ Errors block publish. Warnings must be acknowledged when the draft is submitted.
 | L4 | `PARTITION_OVERLAP` / `PARTITION_EXCEEDS_CAPACITY` | E | A spot is in two partitions, or the partition counts exceed capacity |
 | L4 | `PARTITION_SPOT_MISSING` | E | A partition names spot keys that don't exist in every layout of every room the template can use. Use tags instead |
 | L4 | `TIMETABLE_CONFLICT` | E | Over the horizon, two series claim the same room at overlapping times (the first 10 collisions are listed) |
-| L4 | `SERIES_OUTSIDE_HOURS` | E | An occurrence falls outside studio or room hours |
+| L4 | `SERIES_OUTSIDE_HOURS` | E | An occurrence, including its room and teacher buffers, falls outside studio or room hours |
 | L4 | `UNSATISFIABLE_SELECTOR` | E/W | No room matches (error); no current person matches (warning) |
 | L4 | `PAYMENT_IMPOSSIBLE` | E | `units_only`, but no product grants the unit and covers the template |
-| L4 | `COVERAGE_UNCOVERABLE` | E | A coverage interval cannot be covered by any allowed shift start and duration |
+| L4 | `COVERAGE_UNCOVERABLE` | E | Some coverage interval on some day cannot be covered by the shift candidates for that day and studio. Candidates must fit inside desk availability (§4.6) |
 | L4 | `HARD_CONTRADICTION` | E | Contradictory hard rules, e.g. `max_hours/day` < the shortest shift for a role |
 | L4 | `WAITLIST_SCHEDULE_UNORDERED` | E | Waitlist schedule offsets are not strictly decreasing |
-| L4 | `UNSTAFFED_AFTER_DEADLINE` | W | `unstaffed.check_at` is later than the `sub_finder` workflow's deadline offset |
+| L4 | `UNSTAFFED_NOT_AFTER_DEADLINE` | W | `unstaffed.check_at` is at or before the `sub_finder` workflow's deadline, so a substitute found just before the deadline cannot be approved in time. The check must be at least 15 min after the deadline |
 | L4 | `WORKFLOW_CYCLE` | E | Static cycle in the workflow event graph |
 | L4 | `FEE_ABOVE_CEILING` | E | A fee is above `tenant.fee_ceiling` |
 | L4 | `WAITLIST_SILENT` | W | `offer_all` mode with no workflow on `waitlist.offered`, or no workflow on `waitlist.skipped` |
@@ -169,6 +169,7 @@ Principle: a confirmed booking never changes silently.
 | Workflow changed or removed | Pending actions of removed workflows are cancelled; changed workflows are re-planned idempotently (§9.5) | — |
 | Limit max lowered | `max = max(new, current count)`; existing bookings kept | — |
 | Studio closed or room removed | §3.12.2 / §3.12.3 | — |
+| Template removed (series or one-off sessions still in the future) | **No default.** One impact group per future session | (a) keep until it has run; (b) cancel, refund, notify |
 
 **Publish:**
 

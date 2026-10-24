@@ -124,32 +124,39 @@ CREATE INDEX place_claim_customer ON place_claim(customer_id);
 CREATE INDEX place_claim_expiry ON place_claim(expires_at) WHERE kind = 'hold';
 CREATE TABLE offer (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('place','substitute')), session_id TEXT NOT NULL,
   waitlist_entry_id TEXT, requirement_key TEXT, customer_id TEXT, resource_id TEXT, state TEXT NOT NULL,
-  expires_at INTEGER NOT NULL, reply_text TEXT, created_by TEXT NOT NULL, run_id TEXT,
+  expires_at INTEGER NOT NULL, reply_text TEXT, hold_id TEXT, created_by TEXT NOT NULL, run_id TEXT,
   CHECK ((customer_id IS NULL) != (resource_id IS NULL)));
 CREATE INDEX offer_open ON offer(session_id, state, expires_at);
 CREATE UNIQUE INDEX offer_one_open_substitute ON offer(session_id, requirement_key, resource_id) WHERE state = 'sent';
 ```
 
-**Hold expiry.** The SessionGate alarm releases each hold when it expires. A sweep also runs every minute:
+**Hold expiry.** The SessionGate alarm releases each hold when it expires. A sweep also runs every minute. It finds expired holds with:
 
 ```sql
-DELETE FROM place_claim WHERE kind = 'hold' AND expires_at <= :now
+SELECT session_id, place_id, holder_id FROM place_claim WHERE kind = 'hold' AND expires_at <= :now LIMIT 200
 ```
 
-The sweep then marks those holds `expired` and emits `place.released` for them. Holds claim only places, never occupancy (there are no on-demand bookings in v2.0), so an expired hold can never block a teacher or a room.
+and releases them **one session per batch** through `release_place` (§7.7). Each batch deletes the place claim (guarded on holder and expiry), marks the hold `expired`, sets `reserved_for` if the waitlist has waiting entries, and emits `place.released`.
+
+A second sweep runs promotion for places whose `reserved_for` was set more than 30 s ago. The sweep may never free places with a bare `DELETE`, because that would bypass waitlist priority. Holds claim only places, never occupancy (there are no on-demand bookings in v2.0), so an expired hold can never block a teacher or a room.
 
 ## 12.5 Bookings, counters, ledger
 
 ```sql
 CREATE TABLE booking (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, place_id TEXT, customer_id TEXT NOT NULL,
   session_start INTEGER NOT NULL, state TEXT NOT NULL, payment TEXT NOT NULL, terms TEXT NOT NULL, group_id TEXT,
-  place_refilled INTEGER NOT NULL DEFAULT 0, booked_via TEXT NOT NULL, config_version INTEGER NOT NULL,
+  booked_via TEXT NOT NULL, config_version INTEGER NOT NULL,
   decision_id TEXT NOT NULL, source TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, last_batch TEXT,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE UNIQUE INDEX booking_one_active ON booking(session_id, customer_id)
   WHERE state IN ('pending_approval','confirmed','checked_in') AND group_id IS NULL;
 CREATE INDEX booking_customer ON booking(customer_id, session_start);
 CREATE INDEX booking_session ON booking(session_id, state);
+
+CREATE TABLE customer_strike (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, booking_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('late_cancel','no_show')), at INTEGER NOT NULL, removed_at INTEGER, removed_by TEXT,
+  UNIQUE (booking_id, kind));
+CREATE INDEX customer_strike_window ON customer_strike(customer_id, at) WHERE removed_at IS NULL;
 
 CREATE TABLE limit_counter (key TEXT PRIMARY KEY, count INTEGER NOT NULL, max INTEGER NOT NULL, window_end INTEGER NOT NULL,
   CHECK (count >= 0 AND count <= max)) WITHOUT ROWID;
@@ -199,7 +206,7 @@ CREATE TABLE audit (seq INTEGER PRIMARY KEY, id TEXT UNIQUE, at INTEGER, actor T
 |---|---|
 | A person, room or desk lane double-claimed, from any domain or source | `occupancy` primary key |
 | Two members on one mat | `place_claim` primary key |
-| A waitlisted member bypassed by a new booker | `place.reserved_for` + hold assert (§7.5.2) |
+| A waitlisted member bypassed by a new booker | `place.reserved_for`, set by `release_place` on every freeing path, plus the hold assert (§7.5.2); promotion sweep when the gate is down |
 | Double booking by one member | partial unique index on `booking` |
 | Over-spending credits | CHECK `balance >= 0` |
 | Exceeding a limit or cap | `limit_counter` CHECK |

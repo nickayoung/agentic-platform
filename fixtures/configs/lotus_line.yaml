@@ -12,6 +12,7 @@ tenant:
   fee_ceiling: { minor: 5000, currency: USD }
   closure_pay_notice: 2h
   closing_notice: 14d
+  refund_credit_product: refund_credit
   environment_guards: { preview_outbound: sandbox }
 locations:
   - { key: park_slope, name: "Park Slope", timezone: America/New_York,
@@ -163,7 +164,13 @@ templates:
     kind: shift
     tags: [desk, opening]
     duration: 6h30m
-    scheduling: { mode: rostered, allowed_starts: ["06:15"] }
+    scheduling:
+      mode: rostered
+      starts:   # placeholder start times pending tenant confirmation (Q-12)
+        - { at: "06:15", days: [mon, tue, wed, thu, fri], locations: [park_slope, williamsburg] }
+        - { at: "07:30", days: [sat, sun], locations: [park_slope, williamsburg] }
+        - { at: "07:00", days: [mon, tue, wed, thu, fri], locations: [dumbo] }
+        - { at: "08:00", days: [sat], locations: [dumbo] }
     participants: { who: none }
     requirements:
       - { key: worker, select: { role: desk_staff }, assign: roster }
@@ -173,7 +180,14 @@ templates:
     kind: shift
     tags: [desk]
     duration: 4h
-    scheduling: { mode: rostered, allowed_starts: ["11:00", "16:00"] }
+    scheduling:
+      mode: rostered
+      starts:
+        - { at: "11:00", days: [mon, tue, wed, thu, fri] }
+        - { at: "16:00", days: [mon, tue, wed, thu, fri] }
+        - { at: "11:00", days: [sat, sun], locations: [park_slope, williamsburg] }
+        - { at: "13:30", days: [sat, sun], locations: [park_slope, williamsburg] }
+        - { at: "12:00", days: [sat], locations: [dumbo] }
     participants: { who: none }
     requirements:
       - { key: worker, select: { role: desk_staff }, assign: roster }
@@ -183,15 +197,22 @@ templates:
     kind: shift
     tags: [desk, closing]
     duration: 8h30m
-    scheduling: { mode: rostered, allowed_starts: ["12:45"] }
+    scheduling:
+      mode: rostered
+      starts:
+        - { at: "12:45", days: [mon, tue, wed, thu, fri], locations: [park_slope, williamsburg] }
+        - { at: "09:30", days: [sat, sun], locations: [park_slope, williamsburg] }
+        - { at: "12:00", days: [mon, tue, wed, thu, fri], locations: [dumbo] }
     participants: { who: none }
     requirements:
       - { key: worker, select: { role: desk_staff }, assign: roster }
       - { key: desk, select: { type: front_desk }, assign: fixed, occupancy: lane }
 timetable:
   # Used once the classes domain is owned (§18.9 phase 3). In mirror mode, sessions come from BookingVendor.
-  - { key: ps_vinyasa_0700, template: vinyasa_60, location: park_slope, rrule: "FREQ=DAILY",
+  - { key: ps_vinyasa_0700, template: vinyasa_60, location: park_slope, rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
       start_local: "07:00", valid_from: "2027-03-01", fixed: { room: ps_studio_1 } }
+  - { key: ps_vinyasa_0800_wknd, template: vinyasa_60, location: park_slope, rrule: "FREQ=WEEKLY;BYDAY=SA,SU",
+      start_local: "08:00", valid_from: "2027-03-06", fixed: { room: ps_studio_1 } }
   - { key: ps_vinyasa_0900, template: vinyasa_60, location: park_slope, rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
       start_local: "09:00", valid_from: "2027-03-01", fixed: { room: ps_studio_1 } }
   - { key: ps_hot_1800, template: hot_75, location: park_slope, rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH",
@@ -227,6 +248,7 @@ policies:
       - { key: daily, window: day, max: 2, message: "You can book up to 2 classes per day." }
       - { key: upcoming_member, window: upcoming, max: 8, applies_if: "customer.tier != 'unlimited'",
           message: "You can hold up to 8 upcoming classes." }
+    strike_window: 90d
     approval: { required_if: "customer.strikes >= 3", approver_roles: [manager, desk], timeout: 4h, on_timeout: reject }
     min_attendance: { min: 3, check_at: { before_start: 2h }, action: cancel_session }
     unstaffed: { check_at: { before_start: 90m }, action: cancel_session }
@@ -262,6 +284,8 @@ entitlement_products:
     validity: { length: 26w, anchor: purchase, recurring: false }
     priority: 2
     sold_by: external
+  - { key: refund_credit, name: "Refund credit", kind: pack, tier: member, grants: [{ unit: class_credit, amount: 1 }],
+      validity: { length: 90d, anchor: purchase, recurring: false }, priority: 3, sold_by: platform }
   - key: intro_month
     name: "Intro month (new members)"
     kind: pack
@@ -346,7 +370,7 @@ workflows:
     recheck_at_fire: true
     actions:
       - { type: invoke_hook, hook: substitute_finder,
-          input: { session_id: "session.id", deadline: "session.start - duration('90m')" } }
+          input: { session_id: "session.id", deadline: "session.start - duration('2h')" } }
   - key: desk_vacated
     name: "Desk shift vacated"
     trigger: { event: assignment.vacated, where: "assignment.requirement_key == 'worker'" }
@@ -448,4 +472,7 @@ access:
     - { issuer: staff_auth, claim: groups, equals: lotus-desk, grant: desk, location_claim: studios }
     - { issuer: staff_auth, claim: groups, equals: lotus-teachers, grant: instructor }
     - { issuer: staff_auth, claim: groups, equals: lotus-staff, grant: staff }
+  staff_role_mappings:   # placeholder group names pending tenant confirmation (Q-11)
+    - { issuer: staff_auth, claim: groups, equals: lotus-teachers, role: teacher }
+    - { issuer: staff_auth, claim: groups, equals: lotus-desk, role: desk_staff }
   default_member_role: member

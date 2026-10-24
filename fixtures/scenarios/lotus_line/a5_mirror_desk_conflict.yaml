@@ -1,0 +1,49 @@
+scenario: A.5 mirrored class blocks an owned desk shift (all three orders)
+config: fixtures/configs/lotus_line.yaml
+domain_modes: { classes: mirror, bookings: mirror, members: mirror, shifts: owner }
+clock: "2027-03-08T09:00:00-05:00"
+given:
+  people:
+    - { id: priya, roles: [teacher, desk_staff], email: priya@example.com }
+  person_mappings: [{ system: booking_vendor, external_person_id: BV-1187, person: priya }]
+when:
+  - mirror_event: { system: booking_vendor, type: class.updated,
+                    class: { id: BV-C-9001, type: VIN60, room: PS-1, start: "2027-03-09T09:00:00-05:00",
+                             end: "2027-03-09T10:00:00-05:00", instructor: BV-1187 } }
+  - assign: { person: priya, session: { template: desk_open, location: park_slope, date: "2027-03-09" }, as: r1 }
+  - solve: { scope: { roles: [desk_staff] }, horizon: { from: "2027-03-09", days: 1 }, as: s1 }
+then:
+  - claim: { person: priya, source: mirror, occ: ["2027-03-09T08:50:00-05:00", "2027-03-09T10:10:00-05:00"], state: active }
+  - result: { ref: r1, status: 409, code: RESOURCE_CONFLICT }
+  - solution: { ref: s1, not_assigned: { person: priya, overlapping: ["08:50", "10:10"] } }
+variants:
+  - name: class arrives after the shift (order 2)
+    steps:
+      - assign: { person: priya, session: { template: desk_open, location: park_slope, date: "2027-03-10" }, expect: 201 }
+      - mirror_event: { system: booking_vendor, type: class.updated,
+                        class: { id: BV-C-9002, type: VIN60, room: PS-1, start: "2027-03-10T09:00:00-05:00",
+                                 end: "2027-03-10T10:00:00-05:00", instructor: BV-1187 } }
+    then:
+      - claim: { person: priya, source: mirror, date: "2027-03-10", state: conflicted }
+      - drift: { kind: cross_domain_conflict, within_seconds: 60 }
+      - outbox: { topic: notify, message: cross_domain_conflict }
+      - assign: { person: priya, session: { template: desk_mid, location: park_slope, date: "2027-03-10", start: "11:00" },
+                  expect: 201 }       # 11:00 is after the class; allowed
+  - name: unmapped teacher (order 3)
+    steps:
+      - mirror_event: { system: booking_vendor, type: class.updated,
+                        class: { id: BV-C-9003, type: VIN60, room: WB-1, start: "2027-03-11T09:00:00-05:00",
+                                 end: "2027-03-11T10:00:00-05:00", instructor: BV-2290 } }
+      - assign: { person: priya, session: { template: desk_open, location: dumbo, date: "2027-03-11" }, expect: RESOURCE_CONFLICT }
+    then:
+      - session: { external_id: BV-C-9003, status: needs_mapping }
+      - drift: { kind: unmapped_person }
+  - name: Kairos does not cancel mirrored classes (mode guard, §7.13)
+    steps:
+      - mirror_event: { system: booking_vendor, type: class.updated,
+                        class: { id: BV-C-9004, type: VIN60, room: PS-1, start: "2027-03-12T07:00:00-05:00",
+                                 end: "2027-03-12T08:00:00-05:00", instructor: BV-1187, booked: 1 } }
+      - advance_to: "2027-03-12T05:00:00-05:00"
+    then:
+      - session: { external_id: BV-C-9004, status: scheduled }
+      - outbox: { none_matching: "gateway.booking_vendor.cancel*" }

@@ -39,6 +39,13 @@
 | D-33 | A substitute offer lasts 20 min, or 10 min when the class starts within 6 h. The top 3 candidates are asked at once | Speed versus fairness |
 | D-34 | When an outside system creates a class that overlaps an *owned* desk shift, Kairos does **not** vacate the shift automatically. It raises a conflict, alerts managers and blocks the time | A human decides which side changes. Revisit after Phase 1 data (Q-05) |
 | D-35 | Tenant data is retained 30 days after closure, then crypto-shredded, and a deletion certificate is issued. A legal hold blocks deletion | Clear offboarding (review F-08) |
+| D-36 | Payroll source per kind and phase (§18.8). Kairos exports desk hours from the shifts cutover, and teaching hours from the classes cutover. The old systems' exports are switched off on those dates | Nobody is paid twice (review G-09) |
+| D-37 | Built-in policy behaviour runs only for owned domains. Shadow is a dry run, and mirror runs nothing (§7.13) | Kairos never acts on another system's records (review G-02) |
+| D-38 | Rostered templates declare start times per weekday and studio, and candidates must fit desk availability (§4.6) | Real studio hours differ by day and studio (review G-01) |
+| D-39 | Config staff roles come from `access.staff_role_mappings`, with audited manager overrides (§4.13) | Rostering needs a defined source of roles (review G-04) |
+| D-40 | Strikes expire after `strike_window` (default 90 days) and can be removed by managers | Members aren't gated forever (review G-10) |
+| D-41 | A pending, validated substitute proposal defers the unstaffed check to `min(expires_at, start − 30m)`. Substitute proposals expire at `min(start − 30m, now + 2h)` | A found substitute isn't thrown away (review G-07) |
+| D-42 | `max_hours`, `max_assignments` and `max_consecutive_days` count all of the person's work by default (`counts: all_work`) | Labour limits cover teaching plus desk work (review G-08) |
 
 ## 16.2 Assumptions
 
@@ -84,3 +91,22 @@
 | F-23 staff who are members | §3.12.5, D-32 |
 | F-24 unapproved proposals | I-28a |
 | F-25 – F-41 (minor) | Mat examples fixed (§7.5.3, §11.4, §4b.1); view fields (§5.3); locked paths (§4.1.1); unit conversion (§4.2); role clash (§4.4); drift ownership (§3.11); missing endpoints (§11.3); I-22 wording; skipped notice (§4b.1); flag removal (§15); inbound dedupe (§12.6); full re-home SQL (§12.3); the D-09 departure; log isolation (§13.1). F-28 (gym `protect_pt`) and F-38 (coworking search) no longer apply |
+
+## 16.4 Second-review findings addressed
+
+| Finding | Where it is fixed |
+|---|---|
+| G-01 reference config invalid; shift starts | §4b.1 (timetable, desk `starts`), §4.6, §6.3, §15 Phase 0 (real validator in CI), D-38 |
+| G-02 built-in behaviour on mirrored records | §7.13, §7.1, §14.1 mode tests, `a5_…` mode-guard variant, D-37 |
+| G-03 offer accept vs hold assert | §7.5.2, §7.7, §3.8 `Offer.hold_id`, §11.3, §12.4, A.3 |
+| G-04 config staff roles | §4.13 `staff_role_mappings`, §3.12.4, §4b.1, D-39 |
+| G-05 staff writes on mirrored domains | §18.5.1, §8.6 step 9, A.4 |
+| G-06 promotion when the gate is down; sweep | §7.7 `release_place`, promotion sweep, §12.4 |
+| G-07 unstaffed check vs pending proposal | §8.6 step 7, §6.3 `UNSTAFFED_NOT_AFTER_DEADLINE`, §4b.1 deadline T−2h, D-41 |
+| G-08 hour-counting scope | §4.11 `counts`, §8.3, D-42 |
+| G-09 payroll source | §18.8, D-36 |
+| G-10 strike decay | §3.5 `CustomerStrike`, §4.8 `strike_window`, §12.5, D-40 |
+| G-11 eval grammar and scenarios | §14.4 grammar, `evals/config-agent/schema.json`, `intents.yaml`, `fixtures/scenarios/lotus_line/`, Y-REF-01 turns and `golden_ignore` |
+| G-12 unmapped teacher across studios | §18.5 step 3, §8.3 `unmapped_blocks`, A.5 |
+| G-13 – G-23 (minor) | `place_refilled` computed (§3.8); refund credit product (§4.3); late offline check-in (§3.8.1); offboarding offers and proposals (§3.12.4); two-token linking (§3.12.5, §11.3); two-person rule via proposals (§3.10, §11.3, §18.7); frozen tier (§3.5); unlimited ledger rows (§3.9); `needs_mapping` bookable (§7.4); Phase 1 façade (§15). template retire (G-19) in the §6.8 impact table |
+

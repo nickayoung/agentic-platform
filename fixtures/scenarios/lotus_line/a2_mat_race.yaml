@@ -1,0 +1,23 @@
+scenario: A.2 mat-hold race on Mat 12
+config: fixtures/configs/lotus_line.yaml
+domain_modes: { classes: owner, bookings: owner, members: owner, shifts: owner }
+clock: "2027-03-08T10:00:00-05:00"
+given:
+  customers:
+    - { id: amy, entitlements: [{ product: pack_10, balance: 5 }] }
+    - { id: ben, entitlements: [{ product: pack_10, balance: 5 }] }
+  sessions:
+    - { series: ps_vinyasa_0700, date: "2027-03-09", fill: 0 }
+when:
+  - concurrent:            # both submitted within 50 ms; run with gate on and with gate off
+      - hold: { customer: amy, session: ps_vinyasa_0700@2027-03-09, place: mat_12, as: hold_a }
+      - hold: { customer: ben, session: ps_vinyasa_0700@2027-03-09, place: mat_12, as: hold_b }
+then:
+  - exactly_one_of:
+      - { result: hold_a, status: 201 }
+      - { result: hold_b, status: 201 }
+  - other_result: { status: 409, code: PLACE_TAKEN, alternatives_include: [mat_18, mat_24] }
+  - place_claims: { session: ps_vinyasa_0700@2027-03-09, place: mat_12, count: 1 }
+  - advance_to: "2027-03-08T10:05:01-05:00"
+  - place_claims: { session: ps_vinyasa_0700@2027-03-09, place: mat_12, count: 0 }
+  - event: { name: place.released, data: { reason: hold_expired } }

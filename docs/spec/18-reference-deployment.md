@@ -53,7 +53,7 @@ None of the front ends contains scheduling logic. They render what the API retur
 | Mat map | `GET /sessions/{id}/places`, showing mat states, partition badges and waitlist-reserved mats |
 | Book | `POST /holds` → quote and terms (waiver or intake if required) → `POST /bookings` (for price payments, the processor's hosted step comes first) |
 | Cancel | `POST /bookings/{id}/cancel?preview=true` → confirm |
-| Waitlist | `POST /sessions/{id}/waitlist`, then accept an offer link (`POST /offers/{id}/accept` → hold → confirm) |
+| Waitlist | `POST /sessions/{id}/waitlist`. Offer links call `POST /offers/{id}/accept`, which returns a hold, then `POST /bookings` confirms |
 | Account page | `GET /customers/me`, bookings, entitlements, freeze, close account, export |
 | Checkout (packs and memberships) | Phases 1–4: BookingVendor's embedded checkout. Phase 5: processor checkout plus `POST /entitlements` |
 | AI chat assistant | Member support assistant (§18.4.4) |
@@ -130,8 +130,24 @@ None of the front ends contains scheduling logic. They render what the API retur
 **Person mapping** (`person_mapping`, §3.11), for the teachers of mirrored classes:
 1. On the first sighting of a BookingVendor instructor ID, match it to a person by directory email. If exactly one person matches, the mapping is set with `match: email`.
 2. Otherwise the mapping is `unmatched`. The mirrored class is stored with `status = needs_mapping`, and an `unmapped_person` drift item alerts managers (§4b.1 `cross_domain_alert`).
-3. **While a class is unmapped, the validator refuses every desk assignment at that studio that overlaps the class**, with `RESOURCE_CONFLICT` and the reason "unmapped teacher". Kairos doesn't know who the teacher is, so it treats every desk worker at that studio as a possible teacher (D-26).
+3. **While a class is unmapped, the validator refuses any desk assignment, at any studio, for a person with the `teacher` role, if it overlaps `[class.occ_start − max transfer time, class.occ_end + max transfer time]`.** The refusal is `RESOURCE_CONFLICT` with the reason "unmapped teacher". Kairos doesn't know who the teacher is, so every teacher is a possible match (D-26). Desk workers without the `teacher` role are not affected. The solver gets the same rule through `unmapped_blocks` (§8.3).
 4. A manager fixes the mapping in the portal (`PUT /sync/person-mappings/…`). The class's teacher claim is then written onto the person, and the class becomes `scheduled`.
+
+### 18.5.1 Staff and lifecycle writes by mode
+
+For each staff or lifecycle write, the table says what Kairos does when the affected domain is mirrored (shadow behaves as mirror for writes, §7.12), and when it is owned.
+
+| Write | Domain | Mirror / shadow | Owner |
+|---|---|---|---|
+| Sick call or time off: vacate **classes** | classes | Not done by Kairos. The portal shows "Arrange cover in BookingVendor" with a deep link. The mirrored claim remains until BookingVendor changes the class | Vacate → substitute flow (§8.6) |
+| Sick call or time off: vacate **desk shifts** | shifts | Write-through to ShiftTool (Phase 1 runs ShiftTool in push mode) | Vacate → `desk_vacated` workflow |
+| Substitute, or a teacher change from a roster solve | classes | Write-through `PATCH gateway/booking_vendor/classes/{id} {instructor}`, if BookingVendor supports it (A-03); otherwise not available | Native |
+| Studio closure | classes + shifts | Classes: write-through cancel per class, if supported; otherwise a manager task "cancel in BookingVendor" per class. Shifts: native | Native (§3.12.2) |
+| Room or mat block | classes | Write-through room change or capacity change, if supported; otherwise a manager task | Native (§3.12.3) |
+| Studio cancel (minimum attendance, unstaffed) | classes | Off (§7.13) | Native |
+| Member merge, suspend, close, freeze | members | Not available in Kairos. The UI links to BookingVendor | Native (§3.12.5) |
+| Member erase | members | Kairos erases its mirror copy and creates a manager task to erase in BookingVendor | Native |
+| Staff deactivation | shifts / classes | Owned shifts are vacated natively. Mirrored classes: a manager task per future class "reassign in BookingVendor", and the person's mirrored claims stay until BookingVendor changes them | Native for every owned domain |
 
 **Allowed mode combinations.** A domain may be `owner` only once its dependencies are `owner`:
 - shifts: no dependencies;
@@ -155,7 +171,7 @@ None of the front ends contains scheduling logic. They render what the API retur
 
 ## 18.7 Mode transitions and rollback
 
-Every mode change needs the owner role plus a second owner or admin (the **two-person rule**), is behind a flag, and is audited.
+Every mode change is behind a flag and is audited. It follows the **two-person rule**: `POST /sync/domains/{d}/mode` creates a `domain_mode` proposal, and a **different** owner or admin approves it (`POST /proposals/{id}/approve`). The change takes effect only when that approval is applied.
 
 **Mirror → shadow**
 - *Gate:* drift below 0.5 % for 7 days.
@@ -195,6 +211,16 @@ Every mode change needs the owner role plus a second owner or admin (the **two-p
 - **The export.** `POST /exports/hours` builds a batch with a stable `batch_id` and sends it to PayrollCo through the gateway (idempotency key = `batch_id`). Each line carries `payroll_ref`, date, start, end, elapsed minutes, kind and studio. Corrections go into the next batch as adjustment lines.
 - **Offboarded staff.** Their hours are included up to their effective date, and those lines are flagged `final`.
 - Kairos stops at hours. It never handles pay rates or taxes.
+
+**Which system sends each kind of hours to PayrollCo** (D-36). Kairos exports only the kinds it is the source for, so nobody is paid twice:
+
+| Phase (§15) | Desk hours (`kind: shift`) | Teaching hours (`kind: teaching`) |
+|---|---|---|
+| Before Phase 1 | ShiftTool (as today) | The current system, as today (BookingVendor or manual; Q-13) |
+| 1–2 | **Kairos**, from the shifts cutover date. ShiftTool's payroll export is switched off on that date. During the 60-day push period, ShiftTool receives shifts but does not export hours | Current system |
+| 3 onwards | Kairos | **Kairos**, from the classes cutover date; the current system's teaching export is switched off on that date |
+
+The cutover date is an export boundary. Hours whose `scheduled_start` is before the date belong to the old system. The Phase 1 parallel-run check (§15) compares Kairos's desk hours against ShiftTool's **computed** hours. Only Kairos's hours are sent.
 
 ## 18.9 Cutover order
 

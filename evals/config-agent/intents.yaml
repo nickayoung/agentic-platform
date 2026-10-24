@@ -1,0 +1,14 @@
+# Intent keys used by must_ask / not_expressible / suggests / turns[].expect_question_about (§14.4).
+# A key matches when an ask_user call (or the agent's not-expressible / suggestion list) contains any listed phrase,
+# case-insensitive, or tags the key explicitly via fact kind.
+existing_bookings_resolution: ["existing bookings", "already booked", "people booked", "what should happen to"]
+greenpoint_hours: ["greenpoint", "opening hours", "hours"]
+greenpoint_layout_rows: ["rows", "mat layout", "how many mats per row"]
+late_cancel_consequence: ["late cancel", "after the cutoff", "lose the credit", "fee"]
+marketing_automation: ["marketing", "promotional", "birthday"]
+mat_layout: ["mat layout", "rows", "mat map", "spot map"]
+on_demand_private_sessions: ["private session", "any free time", "on demand"]
+per_place_price: ["price per mat", "front-row price", "surcharge"]
+staff_created_one_off_capacity_1: ["one-off", "capacity of 1", "private class created by staff"]
+tier_reserved_partition: ["reserve the front row", "tier", "unlimited members"]
+unstaffed_class_handling: ["no substitute", "can't find a sub", "unstaffed", "no teacher"]

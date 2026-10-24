@@ -80,7 +80,7 @@ Roles are listed per group. The full matrix is in §13.2.
 | `POST /offers {kind: substitute, session_id, requirement_key, resource_id, expires_at, note?}` | Substitute offer (substitute finder, manager). Place offers are created only by the engine |
 | `GET /offers?recipient=me&state=sent` | Open offers for a teacher (phone app) or a member |
 | `GET /offers/{id}` | Offer detail |
-| `POST /offers/{id}/accept`, `POST /offers/{id}/decline` | The recipient's own token only |
+| `POST /offers/{id}/accept`, `POST /offers/{id}/decline` | The recipient's own token only. For `kind: place`, accept creates the hold in the same batch and returns `{ hold_id, expires_at, quote }`. The member then confirms with `POST /bookings` |
 | `POST /offers/{id}/reply {text, interpreted}` | Substitute finder records an SMS/email reply |
 | `POST /offers/{id}/withdraw` | Creator or manager |
 
@@ -93,7 +93,8 @@ Roles are listed per group. The full matrix is in §13.2.
 | `POST /customers/{id}/suspend {until?, reason, cancel_future}`, `POST /customers/{id}/unsuspend` | Suspension (manager) |
 | `POST /customers/me/close`, `POST /customers/{id}/close` | Close an account |
 | `POST /customers/{id}/export`, `POST /customers/{id}/erase` | Data subject export and erasure (self or manager) |
-| `POST /customers/me/link-staff {confirm}` | Link a member account to the same person's staff identity (§3.12.5) |
+| `POST /resources/me/link-member {customer_id}` (staff token) → `{ link_id }`; `POST /customers/me/link-staff {link_id}` (member token) | Link a member account to the same person's staff identity. Both tokens are required, and the verified emails must match (§3.12.5) |
+| `GET /customers/{id}/strikes`, `DELETE /customers/{id}/strikes/{stk}` | Strikes within the window; manager removal (audited) |
 | `GET /customers/{id}/entitlements`, `GET /entitlements/{id}/ledger` | Credits and memberships |
 | `POST /entitlements {customer_id, product_key, processor_ref}` | Grant (members domain owned) |
 | `POST /entitlements/{id}/adjust {unit, delta, reason}` | Adjustment, bounded by role |
@@ -118,7 +119,7 @@ Roles are listed per group. The full matrix is in §13.2.
 |---|---|
 | `POST /agents/clients {agent, allowlist}`, `DELETE /agents/clients/{id}` | Register or revoke agent clients (owner) |
 | `POST /events/custom {name, data}` | Custom events (agent-scoped names only) |
-| `GET /sync/domains`, `POST /sync/domains/{d}/mode {mode, outbound_push}` | Domain modes (owner; two-person rule, §18.7) |
+| `GET /sync/domains`, `POST /sync/domains/{d}/mode {mode, outbound_push}` → creates a `domain_mode` proposal | Domain modes. Owner proposes; a **different** owner or admin approves through `POST /proposals/{id}/approve` (two-person rule, §18.7) |
 | `POST /sync/domains/{d}/reconcile {window}`, `GET /sync/drift`, `POST /sync/drift/{id}/resolve` | Drift |
 | `GET /sync/person-mappings?state=unmatched`, `PUT /sync/person-mappings/{system}/{external_id} {resource_id}` | Person mapping (manager) |
 | `GET /sync/shadow-disagreements`, `PATCH …/{id}` | Shadow triage |
@@ -126,7 +127,7 @@ Roles are listed per group. The full matrix is in §13.2.
 | `GET`/`PUT /flags/{key}` | Feature flags |
 | `POST /subscriptions {events[], target_service}` | Typed event delivery to other services |
 | `GET /audit?target=&actor=&from=` | Audit log |
-| `POST /tenant/offboard {mode: hand_back \| close}`, `GET /tenant/exports/{id}` | Tenant offboarding (owner, two-person rule) |
+| `POST /tenant/offboard {mode: hand_back \| close}` → creates a `tenant_offboard` proposal; `GET /tenant/exports/{id}` | Tenant offboarding. Two-person rule, as for domain modes |
 | `GET /tenant/status` | Onboarding checklist and go-live state |
 
 ## 11.4 Example: hold and confirm

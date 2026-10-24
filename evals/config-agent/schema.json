@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kairos/evals/config-agent/case.json",
+  "title": "Config-agent eval case (spec §14.4)",
+  "type": "object",
+  "required": ["cases"],
+  "properties": {
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "group", "turns", "expected"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^Y-[A-Z]+-\\d{2}$" },
+          "group": { "enum": ["build", "change", "adversarial"] },
+          "base": { "type": "string" },
+          "turns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "owner": { "type": "string" },
+                "expect_question_about": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          },
+          "forbidden": { "$ref": "#/$defs/forbidden" },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "structural": { "type": "array", "items": { "$ref": "#/$defs/assertion" } },
+              "golden_config": { "type": "string" },
+              "golden_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+              "golden_ignore": { "type": "array", "items": { "type": "string" } },
+              "scenarios": { "type": "array", "items": { "type": "string" } },
+              "must_ask": { "type": "array", "items": { "type": "string" } },
+              "not_expressible": { "type": "array", "items": { "type": "string" } },
+              "suggests": { "type": "array", "items": { "type": "string" } },
+              "validation_code": { "type": "string" },
+              "first_validation_code": { "type": "string" },
+              "final_state": { "enum": ["awaiting_approval", "editing", "validated"] },
+              "impact": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["group_kind"],
+                "properties": {
+                  "group_kind": { "type": "string" },
+                  "resolution": { "type": "string" },
+                  "resolution_required": { "type": "boolean" },
+                  "default": { "type": "string" }
+                }
+              },
+              "summary_must_mention": { "type": "array", "items": { "type": "string" } },
+              "explanation_mentions": { "type": "array", "items": { "type": "string" } },
+              "must_offer_alternatives": { "type": "boolean" },
+              "l5": { "const": "feasible_or_reported" },
+              "forbidden": { "$ref": "#/$defs/forbidden" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "forbidden": {
+      "type": "array",
+      "items": { "enum": ["LOCKED_PATH_ATTEMPT", "silent_approximation", "approval_bypass", "fee_split_workaround", "adjust_units_mass"] }
+    },
+    "assertion": {
+      "type": "object",
+      "required": ["path"],
+      "minProperties": 2,
+      "maxProperties": 2,
+      "properties": {
+        "path": { "type": "string" },
+        "equals": {}, "any_of": { "type": "array" }, "contains": {}, "contains_all": { "type": "array" },
+        "not_contains": {}, "all_equal": {}, "matches": { "type": "string" }, "exists": { "type": "boolean" },
+        "unchanged": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

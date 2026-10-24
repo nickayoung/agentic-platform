@@ -23,10 +23,20 @@ cases:
           closing 12:45 for 8.5h. Park Slope needs 1 on the desk all day, 2 on weekday evenings 5-8.
           Desk staff max 40h a week including teaching, 10h between close and open. Teachers max 4 classes a day,
           15 minutes between classes; 30-40 min travel between studios. Keep regular teachers on their slots.
+          Prices: drop-in $30 Vinyasa and Prenatal, $32 Hot, $28 Flow; first-ever class $15. Approval needed after 3 strikes
+          in 90 days. Refund drop-ins in full if they cancel in time; if we cancel, refund everyone in full.
+          Hours: Park Slope and Williamsburg 6:00-21:30 weekdays, 7:30-18:00 weekends; Dumbo 7:00-20:30 weekdays,
+          8:00-16:00 Saturday, closed Sunday. Williamsburg desk needs 1 person all opening hours, Dumbo 1 person.
+          Weekend desk: open 7:30, mid 11:00 and 13:30, close from 9:30. Dumbo: open 7:00 (8:00 Saturday), close from 12:00,
+          Saturday mid at 12:00.
       - expect_question_about: [unstaffed_class_handling]
         owner: "If we can't find a sub, cancel 90 minutes before and refund everyone."
     expected:
-      golden_config: fixtures/configs/lotus_line.yaml      # compared field-by-field after key normalisation; ≥ 90 % match
+      golden_config: fixtures/configs/lotus_line.yaml
+      golden_threshold: 0.9
+      golden_ignore: ["$.access", "$.simulation", "$.timetable", "$.workflows", "$.custom_fields", "$.forms", "$.views",
+                      "$.availability[?(@.key=='holidays')]", "$.tenant.fee_ceiling", "$.tenant.environment_guards",
+                      "$.tenant.refund_credit_product", "$.entitlement_products[?(@.key=='refund_credit')]"]
       structural:
         - { path: "$.layouts[?(@.key=='mats_30')].generate.per_row", equals: 6 }
         - { path: "$.templates[?(@.key=='hot_75')].requirements[?(@.key=='teacher')].select.skills_all", contains: hot_cert }
@@ -136,8 +146,8 @@ cases:
     base: fixtures/configs/yoga_starter.yaml
     turns: [{ owner: "Add an unlimited membership and keep the front row for unlimited members until the day before." }]
     expected:
-      must_ask: [mat_layout]       # starter has no layout; agent must ask for rows/mats or state not possible
-      not_expressible_unless_layout: [front_row_reservation]
+      must_ask: [mat_layout]       # starter has no layout; the agent must ask for rows and mats before reserving a row
+    forbidden: [silent_approximation]
   - id: Y-CHG-05
     group: change
     base: fixtures/configs/lotus_line.yaml
@@ -167,7 +177,7 @@ cases:
     turns: [{ owner: "Teachers need 30 minutes between classes now, not 15." }]
     expected:
       structural: [{ path: "$.constraints[?(@.key=='teach_rest')].rule.duration", equals: "30m" }]
-      impact: { group_kind: stricter_requirement, flagged_assignments: ">= 0" }
+      impact: { group_kind: stricter_requirement }
 
   # ---------------------------------------------------------------- adversarial and limits
   - id: Y-ADV-01
@@ -209,4 +219,6 @@ cases:
   - id: Y-ADV-08
     group: adversarial
     turns: [{ owner: "Create a staff role called instructor for our teachers." }]
-    expected: { first_validation_code: ROLE_NAME_CLASH, final: { path: "$.roles[*].key", not_contains: instructor } }
+    expected:
+      first_validation_code: ROLE_NAME_CLASH
+      structural: [{ path: "$.roles[*].key", not_contains: instructor }]

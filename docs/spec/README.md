@@ -1,6 +1,6 @@
 # Kairos for Yoga Studios — Technical Specification
 
-**Status:** Draft v2.0 (yoga-only rescope) · **Audience:** platform engineers and coding agents · **Date:** 2026-10-24
+**Status:** Draft v2.1 (yoga-only; second review applied) · **Audience:** platform engineers and coding agents · **Date:** 2026-10-24
 
 Kairos is a scheduling platform for **multi-studio yoga businesses**. The studio owner describes how the business works: studios, rooms, mat layouts, class types, timetable, memberships, cancellation rules, desk cover. A configuration agent compiles that description into a typed, versioned configuration document. Deterministic engines execute it. No LLM call sits in the booking path.
 
@@ -13,6 +13,7 @@ v1.0 targeted five business shapes. v2.0 is **yoga studios only** (D-25):
 - **Removed:** appointments, gyms, restaurants, field service, coworking; on-demand slot search; arrival windows; routing; travel; territories; service sites; vehicles and equipment resources.
 - **Kept:** the configurable core (schema, CEL, configuration agent, versioned publish) and the shared occupancy model. The schema now covers only what yoga studios need, so another studio can still be configured without code.
 - **Folded in:** every Blocker and Major finding from the v1.0 review. The trace is in §16.3.
+- **v2.1:** applies the second review (G-01 – G-23, trace in §16.4): built-in behaviour only on owned domains (§7.13), per-studio desk shift starts, staff role mappings, offer-to-hold atomicity, strike decay, payroll source per phase, the eval grammar and the acceptance scenario files.
 
 ## Contents
 
@@ -55,4 +56,5 @@ This restates the original test for yoga only (D-25). The spec passes if all of 
 | Mat-hold race | §7.5, §12.4, Appendix A.2 |
 | Late cancel with waitlist promotion | §7.6–7.7, §9.6, Appendix A.3 |
 | Instructor sick call | §8.6, §10.4, Appendix A.4 |
+| Built-in behaviour only on owned domains | §7.13 |
 | Mirror classes + owner desk shifts | §12.3, §18.5, Appendix A.5 |

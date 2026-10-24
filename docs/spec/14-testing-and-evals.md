@@ -100,6 +100,12 @@ Zones: `America/New_York` and `Europe/London`.
 - Loop limits.
 - The downstream notification fake receives each idempotency key exactly once.
 
+### Domain-mode tests
+
+Every row of §7.13 runs in each of the three modes. In `mirror`, the test asserts no writes and no outbox rows. In `shadow`, it asserts a dry-run decision is logged and nothing else is written. In `owner`, it asserts the full effect.
+
+Required case: in the Phase 1 configuration (classes mirrored), a mirrored class with 1 booking passes its minimum-attendance time, and Kairos does **not** cancel it.
+
 ### Static rule
 
 A lint fails the build if `packages/engine/**` reads `TemplateDef.kind` or compares a value to `'class'` or `'shift'`.
@@ -134,8 +140,18 @@ then:
   - outbox: { none_matching: "fee:*cara*" }
 ```
 
+**DSL keys** (the scenario runner rejects any key not listed here):
+
+| Key | Meaning |
+|---|---|
+| `config`, `domain_modes`, `clock`, `gate` | The config fixture; the mode of each domain; the virtual start time; `unavailable` to simulate a SessionGate outage |
+| `given` | Seed data: `customers`, `people`, `sessions` (`series@date`, `fill`, `bookings`, `waitlist`, `assignments`, `payments`), `person_mappings` |
+| `when` / `steps` | Actions: `hold`, `confirm`, `cancel`, `accept_offer`, `approve_proposal`, `assign`, `solve`, `time_off`, `mirror_event`, `advance_to`, `at` (run the step at a time), `concurrent` (submit the listed steps within 50 ms), `as` (name a result), `expect` (expected status or code) |
+| `then` | Assertions: `booking(s)`, `balance`, `ledger`, `place`, `place_claims`, `claim`, `session`, `assignment`, `offer(s)`, `proposal`, `waitlist_entry`, `event`, `outbox` (`none_matching` uses a glob), `drift`, `writes` (`none_except`), `result`, `exactly_one_of`, `other_result`, `solution`, `within` (seconds) |
+| `variants` | Re-run with `given_override`, `clock`, `domain_modes`, `gate` and extra `steps`, checked against the variant's own `then` |
+
 Required scenario suites:
-- **Acceptance (A.1–A.5):** mat race, late cancel and waitlist with all five variants, sick call (filled / proposal expired / no substitute → studio cancel and refunds), mirror classes + owned desk shifts (both orders, plus an unmapped teacher).
+- **Acceptance (A.2–A.5)**, committed in `fixtures/scenarios/lotus_line/a2_…a5_*.yaml`: mat race, late cancel and waitlist with all five variants, sick call (filled / proposal expired / no substitute → studio cancel and refunds), mirror classes + owned desk shifts (both orders, plus an unmapped teacher).
 - **Lifecycle:** studio closure, mat block re-seat, staff immediate deactivation, member merge, freeze, past-due, close account.
 
 ## 14.2 Fixtures
@@ -162,7 +178,28 @@ The eval suite is committed in `evals/config-agent/`. Each case is a YAML file:
 - `expected.must_ask`: clarifying questions the agent must ask;
 - `forbidden`: banned behaviours.
 
+The scenario files for the acceptance suites (A.2–A.5) are committed. The other scenario files named in `cases.yaml` (`starter/`, `mats/`, `hot/`, `packs/`, `prenatal/`) must be committed before the Phase 2 eval gate, and the grader fails a case whose scenario file is missing.
+
 The expected config for the main case (`Y-REF-01`) is the fixture `lotus_line.yaml`. The other cases state their expected configs as structural assertions plus scenarios, which test behaviour rather than shape.
+
+**Assertion grammar.** The grammar is normative, and the grader rejects any key not listed here. It is published as JSON Schema in `evals/config-agent/schema.json`.
+
+| Key | Meaning |
+|---|---|
+| `structural[]` | `{ path: JSONPath, <op>: value }`, where `<op>` is one of `equals`, `any_of` (list), `contains` (array contains value), `contains_all`, `not_contains`, `all_equal`, `matches` (regex on string), `exists` (bool), `unchanged` (bool: equal to `base`) |
+| `golden_config` | Path to the expected config. **Match** = (number of leaf paths in the golden config whose value is equal in the draft, after normalising array order by `key`) ÷ (number of golden leaf paths), excluding `golden_ignore` paths. Pass threshold: `golden_threshold` (default 0.9) |
+| `golden_ignore[]` | JSONPath prefixes excluded from the match |
+| `scenarios[]` | Scenario files that must all pass against the produced config |
+| `must_ask[]` | Intent keys. Passes if an `ask_user` call's `fact_ids` or text maps to each key (a keyword table per key lives in `evals/config-agent/intents.yaml`) |
+| `not_expressible[]` / `suggests[]` | Intent keys that must appear in the agent's not-expressible list / its suggested alternatives |
+| `validation_code` / `first_validation_code` | A code that must appear in the final / the first validation report |
+| `final_state` | The draft state at the end (`awaiting_approval`, `editing`) |
+| `impact` | `{ group_kind, resolution?, resolution_required?, default? }`, matched against the impact plan |
+| `summary_must_mention[]` | Substrings of the approved summary |
+| `explanation_mentions[]` | Constraint keys in the infeasibility report |
+| `must_offer_alternatives` | Bool: at least one fixed-table suggestion is shown |
+| `l5` | `feasible_or_reported`: L5 either passes or reports `INFEASIBLE_HARD_CONSTRAINTS` with a core |
+| `forbidden[]` | Behaviour keys: `LOCKED_PATH_ATTEMPT`, `silent_approximation`, `approval_bypass`, `fee_split_workaround`, `adjust_units_mass` |
 
 **Dataset v2.0** (24 cases, all written out in `evals/config-agent/cases.yaml`):
 

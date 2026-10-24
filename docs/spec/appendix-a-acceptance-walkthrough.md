@@ -27,6 +27,8 @@ No business-specific code is involved. The engines never read `kind` (lint, §14
 
 ## A.2 Mat-hold race: **Pass**
 
+This trace needs `bookings = owner` (Phase 4 onwards). In Phases 1–3, mat holds are advisory and BookingVendor's answer is final (§7.12). The concurrency tests in §14.1 still run this trace against the native engine from Phase 2.
+
 Two members tap Mat 12 (row 2, a wall mat, `general` partition) for Tue 07:00 Vinyasa in Park Slope Studio 1, within the same 50 ms.
 
 1. **Store and constraint.** The place claim is stored in the tenant DB table `place_claim`, whose `PRIMARY KEY (session_id, place_id)` admits one claimant. The SessionGate for this class orders the two requests.
@@ -42,7 +44,9 @@ The full timeline is in §9.6.
 
 - **Penalty.** The penalty is deferred to session start. It is waived if `place_refilled` is true. Otherwise, depending on what the late canceller paid with: credit forfeited (pack) and/or a $10 fee (membership), charged through the gateway.
 - **Promotion order.** The freed mat is reserved for the waitlist in the same batch that frees it. A new member's hold on it fails. Promotion then goes by position, honouring mat preferences.
-- **Promoted member.** In `auto_promote` mode there is no hold: the member is booked directly and their credit is reserved. In `offer_all` mode the member accepts the offer, then holds and confirms. The hold expires at `min(now + 5m, offer.expires_at + 5m)`.
+- **Promoted member.** In `auto_promote` mode there is no hold: the member is booked directly and their credit is reserved. In `offer_all` mode, `POST /offers/{id}/accept` creates the hold in the same batch. The offer moves to `accepted` with `hold_id` set, so the hold assert passes. The hold expires at `min(now + 5m, offer.expires_at + 5m)`, and the member confirms with `POST /bookings`.
+- **Gate down.** Every freeing path runs `release_place`, so the mat is still reserved for the waitlist. The promotion sweep promotes within about 90 s (§7.7).
+- **Mode.** All of this is built-in behaviour that needs `bookings = owner` (§7.13), so the trace applies from Phase 4. Before that, BookingVendor runs its own waitlist and Kairos dry-runs this logic in shadow mode.
 - **Promoted member has no credits.** They are `skipped` (`INSUFFICIENT_UNITS`), `skipped_notice` emails them, and the next member is promoted. If nobody is eligible, the reservation is cleared.
 - **Notifications.** The `promoted_notice`, `offer_notice` and `skipped_notice` workflows call the notification service through the outbox, keyed by idempotency key.
 
@@ -53,15 +57,16 @@ Maya is rostered for Tue 18:00 Hot 75 at Park Slope. At 12:00 she submits a sick
 | Time | Step | Detail |
 |---|---|---|
 | 12:00:00 | `POST /time-off {sick, immediate}` | One batch releases Maya's assignment and claim, sets the session to `needs_staff`, and emits `assignment.vacated`. Members keep their bookings. |
-| 12:00:01 | `sub_finder` workflow → H3 | Deadline = 18:00 − 90 min = 16:30 |
+| 12:00:01 | `sub_finder` workflow → H3 | Deadline = 18:00 − 2 h = 16:00. The unstaffed check is at 16:30 |
 | 12:00:02 | **Candidate query** `GET /sessions/{id}/substitutes?requirement=teacher` | The validator keeps only `teacher` people with an unexpired `hot_cert` who are available, have no overlapping claim in any domain (including desk shifts and mirrored classes), and satisfy `teach_rest`, `teach_day` and transfer time. Ranked: Leo (fewest minutes this week), Ana (has taught this slot 9 times), Ravi |
 | 12:00:03 | **Outreach** `POST /offers` ×3, in rank order, at once | The class starts within 6 h, so each offer expires at 12:10 (D-33). Messages go through the notification service. No quiet hours apply. |
 | 12:10 | All three offers expire | The next wave fetches candidates again. None are left, so the run ends `exhausted` and emits `custom.substitute_exhausted`. A manager task is created. |
-| *(Alternative)* 12:04 | Ana taps Accept (`POST /offers/{id}/accept`) | A `Proposal` is created and validated. The other offers are withdrawn. The proposal `expires_at` is 14:00 (`min(16:30, now + 2h)`). |
+| *(Alternative)* 12:04 | Ana taps Accept (`POST /offers/{id}/accept`) | A `Proposal` is created and validated. The other offers are withdrawn. The proposal `expires_at` is 14:04 (`min(start − 30m, now + 2h)`). |
 | *(Alternative)* 12:15 | Manager approves | Re-validation passes (with the `resource_day` guards and a scalar assert). Ana's claim is written, the session returns to `scheduled`, and `sub_assigned_notice` notifies members. If Ana became busy before approval, the commit fails with `RESOURCE_CONFLICT`, the proposal moves to `failed`, and outreach continues. |
-| 16:30 | **Unstaffed check** (built-in, `unstaffed.check_at: 90m`) | The slot is still empty, so the class is cancelled with `reason: no_staff`. **Members:** every booking is cancelled, credits are released, price-paid bookings get full refunds through the gateway, waitlist entries expire, and `no_sub_notice` texts everyone. |
+| *(Alternative)* 15:58 | Ravi accepts during a late wave | The proposal is pending at 16:30, so the check is deferred to `min(proposal.expires_at, 17:30)` = 17:30, and approvers get an urgent notification. If it is approved, the class runs. |
+| 16:30 | **Unstaffed check** (built-in, `unstaffed.check_at: 90m`) | The slot is empty and no proposal is pending, so the class is cancelled with `reason: no_staff`. **Members:** every booking is cancelled, credits are released, price-paid bookings get full refunds through the gateway, waitlist entries expire, and `no_sub_notice` texts everyone. |
 
-With classes in mirror mode (Phases 1–2), the approve step and the cancellation are written through to BookingVendor.
+This trace needs `classes = owner` (Phase 3 onwards, §7.13). In Phases 1–2, Maya's sick call vacates only her owned desk shifts. Cover for her class is arranged in BookingVendor (§18.5.1), and her mirrored class claim keeps blocking that time for desk assignments.
 
 ## A.5 Classes mirrored, desk shifts owned: **Pass**
 
@@ -89,7 +94,7 @@ Configuration: Phase 1, with `classes = mirror` and `shifts = owner`.
 **Order 3: teacher unmapped.**
 
 1. `BV-2290` has no mapping, so the class is stored as `needs_mapping` and `unmapped_person` alerts managers.
-2. A manager tries to put anyone on the Park Slope desk overlapping that class. The validator refuses with `RESOURCE_CONFLICT` and the reason "unmapped teacher" (D-26).
+2. A manager tries to put any person with the `teacher` role on a desk shift, at **any** studio, that overlaps the class ± the maximum transfer time (40 min). The validator refuses with `RESOURCE_CONFLICT` and the reason "unmapped teacher" (D-26). The solver never proposes such a shift, because the block is in the IR as `unmapped_blocks`. Desk staff who don't teach are unaffected.
 3. After the mapping is fixed, the claim lands on the right person and the normal rules apply.
 
 In every order, the refusal is enforced by the shared `occupancy` primary key and the shared validator, in the same tenant database, while the two domains are in different modes (I-17, D-05, D-06).

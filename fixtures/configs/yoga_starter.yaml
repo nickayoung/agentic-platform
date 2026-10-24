@@ -12,6 +12,7 @@ tenant:
   fee_ceiling: { minor: 5000, currency: USD }
   closure_pay_notice: 2h
   closing_notice: 14d
+  refund_credit_product: refund_credit
   environment_guards: { preview_outbound: record_only }
 locations:
   - { key: main, name: "Main studio", timezone: America/New_York }
@@ -59,6 +60,8 @@ entitlement_products:
   - { key: pack_5, name: "5 classes", kind: pack, tier: member, grants: [{ unit: class_credit, amount: 5 }],
       validity: { length: 12w, anchor: purchase, recurring: false }, priority: 1, sold_by: platform,
       price: { minor: 11000, currency: USD } }
+  - { key: refund_credit, name: "Refund credit", kind: pack, tier: member, grants: [{ unit: class_credit, amount: 1 }],
+      validity: { length: 90d, anchor: purchase, recurring: false }, priority: 2, sold_by: platform }
 availability: []
 constraints: []
 coverage: []
@@ -82,4 +85,7 @@ access:
         jwks_url: "https://id.example.com/staff/.well-known/jwks.json", subject_claim: sub, tenant_claim: tid }
   role_mappings:
     - { issuer: staff_auth, claim: groups, equals: owners, grant: owner }
+  staff_role_mappings:
+    - { issuer: staff_auth, claim: groups, equals: teachers, role: teacher }
+    - { issuer: staff_auth, claim: groups, equals: owners, role: teacher }
   default_member_role: member

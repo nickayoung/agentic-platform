@@ -1,0 +1,56 @@
+scenario: A.4 instructor sick call, no substitute, class cancelled and refunded
+config: fixtures/configs/lotus_line.yaml
+domain_modes: { classes: owner, bookings: owner, members: owner, shifts: owner }
+clock: "2027-03-09T12:00:00-05:00"
+given:
+  people:
+    - { id: maya, roles: [teacher], skills: [ryt200, hot_cert] }
+    - { id: leo,  roles: [teacher], skills: [ryt200, hot_cert] }
+    - { id: ana,  roles: [teacher], skills: [ryt200, hot_cert] }
+    - { id: ravi, roles: [teacher], skills: [ryt200, hot_cert] }
+  sessions:
+    - { series: ps_hot_1800, date: "2027-03-09", assignments: { teacher: maya }, fill: 20,
+        payments: { price_paid: 4, units: 16 } }
+when:
+  - time_off: { person: maya, reason: sick, immediate: true, start: "2027-03-09T12:00:00-05:00", end: "2027-03-09T23:59:00-05:00" }
+then:
+  - session: { ref: ps_hot_1800@2027-03-09, status: needs_staff }
+  - bookings: { session: ps_hot_1800@2027-03-09, state: confirmed, count: 20 }
+  - offers: { session: ps_hot_1800@2027-03-09, kind: substitute, count: 3, expires_at: "2027-03-09T12:10:00-05:00" }
+  - advance_to: "2027-03-09T12:10:01-05:00"
+  - event: { name: custom.substitute_exhausted }
+  - advance_to: "2027-03-09T16:30:00-05:00"
+  - session: { ref: ps_hot_1800@2027-03-09, status: cancelled, reason: no_staff }
+  - bookings: { session: ps_hot_1800@2027-03-09, state: cancelled, count: 20 }
+  - ledger: { kind: release, count: 16 }
+  - outbox: { topic: gateway.payments.refund, count: 4 }
+  - outbox: { topic: notify, message: class_cancelled, recipients: 20 }
+variants:
+  - name: substitute accepted and approved
+    steps:
+      - at: "2027-03-09T12:04:00-05:00"
+        accept_offer: { person: ana }
+      - at: "2027-03-09T12:15:00-05:00"
+        approve_proposal: { by: manager }
+    then:
+      - session: { ref: ps_hot_1800@2027-03-09, status: scheduled }
+      - assignment: { session: ps_hot_1800@2027-03-09, requirement: teacher, person: ana, state: confirmed }
+      - outbox: { topic: notify, message: substitute_teacher, recipients: 20 }
+  - name: accepted late, pending at check time, approved before deferred deadline
+    steps:
+      - at: "2027-03-09T15:58:00-05:00"
+        accept_offer: { person: ravi }
+      - at: "2027-03-09T16:45:00-05:00"
+        approve_proposal: { by: manager }
+    then:
+      - session: { ref: ps_hot_1800@2027-03-09, status: scheduled }
+  - name: substitute became busy before approval
+    steps:
+      - at: "2027-03-09T12:04:00-05:00"
+        accept_offer: { person: ana }
+      - at: "2027-03-09T12:06:00-05:00"
+        assign: { person: ana, session: { template: desk_mid, location: park_slope, start: "16:00" } }
+      - at: "2027-03-09T12:15:00-05:00"
+        approve_proposal: { by: manager, expect: RESOURCE_CONFLICT }
+    then:
+      - proposal: { state: failed }

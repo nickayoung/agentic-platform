@@ -1,0 +1,50 @@
+scenario: A.3 late cancel promotes the waitlist and the fee is waived on refill
+config: fixtures/configs/lotus_line.yaml
+domain_modes: { classes: owner, bookings: owner, members: owner, shifts: owner }
+clock: "2027-03-09T08:00:00-05:00"
+given:
+  customers:
+    - { id: cara, entitlements: [{ product: unlimited }] }
+    - { id: dana, entitlements: [{ product: pack_10, balance: 3 }] }
+    - { id: eli,  entitlements: [{ product: unlimited }] }
+    - { id: fay,  entitlements: [{ product: unlimited }] }
+  sessions:
+    - { series: wb_vinyasa_1830, date: "2027-03-09", fill: 36, bookings: [{ customer: cara, place: mat_3 }],
+        waitlist: [{ customer: dana, prefers: [mat_3, mat_4] }, { customer: eli }] }
+when:
+  - cancel: { customer: cara, session: wb_vinyasa_1830@2027-03-09 }
+  - hold: { customer: fay, session: wb_vinyasa_1830@2027-03-09, place: mat_3, expect: PLACE_TAKEN }
+then:
+  - booking: { customer: cara, state: late_cancelled }
+  - place: { session: wb_vinyasa_1830@2027-03-09, place: mat_3, partition: general }
+  - booking: { customer: dana, place: mat_3, state: confirmed, booked_via: waitlist }
+  - balance: { customer: dana, unit: class_credit, equals: 2 }
+  - outbox: { topic: notify, message: waitlist_promoted, customer: dana }
+  - advance_to: "2027-03-09T18:30:00-05:00"
+  - event: { name: booking.penalty_assessed, customer: cara, data: { waived: true } }
+  - outbox: { none_matching: "fee:*cara*" }
+variants:
+  - name: promoted member has no credits
+    given_override: { customers: [{ id: dana, entitlements: [{ product: pack_10, balance: 0 }] }] }
+    then:
+      - waitlist_entry: { customer: dana, state: skipped, reason: INSUFFICIENT_UNITS }
+      - outbox: { topic: notify, message: waitlist_skipped, customer: dana }
+      - booking: { customer: eli, place: mat_3, state: confirmed, booked_via: waitlist }
+  - name: offer_all window
+    clock: "2027-03-09T17:00:00-05:00"
+    then:
+      - offer: { customer: dana, kind: place, state: sent, expires_at: "2027-03-09T17:15:00-05:00" }
+      - offer: { customer: eli, kind: place, state: sent }
+      - accept_offer: { customer: eli, as: h }
+      - result: { ref: h, status: 201, has: hold_id }
+      - confirm: { hold: h }
+      - booking: { customer: eli, place: mat_3, state: confirmed }
+  - name: gate down
+    gate: unavailable
+    then:
+      - within: { seconds: 90, expect: { booking: { customer: dana, place: mat_3, state: confirmed } } }
+  - name: bookings mirrored (Phase 1) — no Kairos promotion
+    domain_modes: { classes: mirror, bookings: mirror, members: mirror, shifts: owner }
+    then:
+      - writes: { none_except: [mirror_apply, outbox:gateway.booking_vendor] }
+      - waitlist_entry: { customer: dana, state: waiting }

@@ -25,7 +25,7 @@
 - approval timeouts;
 - refunds.
 
-Workflows (§9) only add reactions such as notifications, tasks and hooks. They never re-implement policy. Two built-in timers run per session:
+Workflows (§9) only add reactions such as notifications, tasks and hooks. They never re-implement policy. **Built-in behaviour runs only on records whose domain Kairos owns** (§7.13). Two built-in timers run per session:
 
 - **Minimum attendance**, at `min_attendance.check_at`. If `booked_count < min`, the session is cancelled with `reason: under_minimum` and refunds per `refund.studio_cancel`.
 - **Unstaffed check**, at `unstaffed.check_at`. If any `roster` requirement is empty, the session is cancelled with `reason: no_staff` (or staff are notified, per the policy).
@@ -60,7 +60,7 @@ When a session is materialised, its places are created from its capacity mode:
 |---|---|---|
 | 1 | Actor may act for this member (self; staff with a role at this studio; agent `on_behalf_of` this member); member `state = active` | `FORBIDDEN`, `ACCOUNT_SUSPENDED` |
 | 2 | Domain routing: if `bookings` is in mirror or shadow mode, take the write-through path (§7.12). If its `write_freeze` is set, return `WRITE_FROZEN` with `Retry-After` | `WRITE_FROZEN` |
-| 3 | Session is `scheduled` or `needs_staff`, and has not started | `SESSION_NOT_BOOKABLE` |
+| 3 | Session is `scheduled`, `needs_staff` or `needs_mapping` (mirrored; bookings are written through, so mapping doesn't matter to members), and has not started | `SESSION_NOT_BOOKABLE` |
 | 4 | Booking window: `opens ≤ now < closes` | `WINDOW_NOT_OPEN`, `WINDOW_CLOSED` |
 | 5 | `template.eligible_if` and `policy.eligible_if` pass | `NOT_ELIGIBLE` |
 | 6 | No duplicate booking (I-21). If `customer_overlap = forbid`, no overlapping booking, and for linked staff no overlapping assignment of their own | `ALREADY_BOOKED`, `CUSTOMER_OVERLAP` |
@@ -104,7 +104,8 @@ INSERT INTO batch_assert (ok) VALUES (
   (SELECT holder_id FROM place_claim WHERE session_id = :session AND place_id = :place) = :hold_id);
 -- 3. assert: mat is usable by this member (not disabled; waitlist reservation honoured)
 INSERT INTO batch_assert (ok) VALUES ((SELECT p.disabled = 0 AND (p.reserved_for IS NULL OR EXISTS (
-    SELECT 1 FROM offer o WHERE o.session_id = :session AND o.kind = 'place' AND o.state = 'sent'
+    SELECT 1 FROM offer o WHERE o.session_id = :session AND o.kind = 'place'
+      AND o.state IN ('sent','accepted') AND o.hold_id = :hold_id
       AND o.customer_id = :customer AND o.expires_at > :now))
   FROM place p WHERE p.id = :place));
 INSERT INTO hold (...) VALUES (...); INSERT INTO decision (...) VALUES (...); INSERT INTO audit (...) VALUES (...);
@@ -174,7 +175,11 @@ One batch, in this order:
 
 **Priority over new bookings (D-27).** Any batch that frees a place (cancellation, hold expiry, partition release, capacity increase, re-seat) checks whether the session has `waiting` entries and the mode is not `closed`. If so, the same batch sets `place.reserved_for = 'waitlist'`. The hold SQL (§7.5.2, assert 3) then refuses that place to anyone who doesn't hold an active place offer. This is enforced in the database, so it holds even when the gate is down.
 
-**Promotion.** The gate runs promotion as its very next command after any batch that sets `reserved_for`.
+**Freeing a place.** Every path that frees a place goes through one routine, `release_place(session, place)`, inside the batch that frees it. That covers cancellation, hold expiry (alarm **or** the 1-minute sweep, §12.4), partition release, capacity increase and re-seat. The routine sets `reserved_for` (D-27) and emits `place.released`.
+
+**Promotion.**
+- The gate runs promotion as its very next command after any batch that sets `reserved_for`.
+- **Fallback:** a promotion sweep runs every minute. For any place with `reserved_for='waitlist'` set more than 30 s ago, it runs the same promotion directly against the database, guarded by the same asserts. A gate outage therefore delays promotion by at most about 90 s; it never strands a mat.
 
 ```
 mode ← first schedule entry whose `until` instant is still in the future; else closed
@@ -191,7 +196,11 @@ auto_promote:
   if nobody promoted: clear reserved_for (place becomes free for anyone)
 offer_all:
   every waiting entry → offered; create a place Offer per entry (expires_at = now + offer_ttl); emit waitlist.offered
-  place stays reserved for offered members; the first offered member to hold + confirm wins (normal flow, assert 3)
+  place stays reserved for offered members.
+  POST /offers/{id}/accept (place) runs ONE batch: offer → accepted, hold created on a reserved place
+    (assert 3 passes because o.hold_id = the new hold), returns hold_id; the member then confirms (POST /bookings).
+  the first accepted offer to confirm wins; booking the place clears its reserved_for.
+  other open offers stay valid while reserved places remain; when none remain they get 409 SESSION_FULL on accept.
   when all offers expire or are declined: entries → waiting (if session still full), reserved_for cleared
 closed: reserved_for not set; at session start all entries → expired; emit waitlist.expired
 ```
@@ -267,3 +276,21 @@ While `bookings` (or `members`, for debits) is not `owner`:
    - Reads are served from the mirror, with a `stale_since` field that front ends show as a banner.
    - Desk check-ins are the only writes that queue: they wait in the desktop app's offline queue, keyed by `client_key`, and replay when the connection returns.
    - Owned domains are unaffected, except that outbound pushes queue in the outbox for up to 24 h before raising `push_failed` drift.
+
+## 7.13 Built-in behaviour by domain mode
+
+Kairos must never act on a record that an outside system owns. Each built-in behaviour therefore runs only when the domain it acts on is `owner`. In `shadow` mode it runs as a **dry run**: the decision is computed and logged as a `ShadowDisagreement` when it differs from the outside system, and nothing is written. In `mirror` mode it does not run at all.
+
+| Behaviour | Needs owner | In shadow | In mirror |
+|---|---|---|---|
+| Session materialisation from the timetable | `classes` | dry run (compares occurrences) | off; sessions come from the mirror |
+| Minimum-attendance cancellation, unstaffed cancellation, partition release timers | `classes` | dry run | off |
+| Waitlist reservation and promotion, offers | `bookings` | dry run | off; the outside system runs its waitlist |
+| No-show marking, penalty assessment, fees, refunds | `bookings` | dry run | off |
+| Approval timeouts | `bookings` | dry run | off |
+| Entitlement expiry, freeze, past-due handling | `members` | dry run | off |
+| Desk-shift materialisation, coverage, roster publish | `shifts` | dry run | off |
+| Person-rule validator on Kairos-originated writes | always on | always on | always on (this is what refuses the desk shift in A.5) |
+
+The timers are still **scheduled** in mirror and shadow modes, so that switching a domain to `owner` needs no back-fill. When a timer fires, it checks the domain mode at that moment. Tests cover each row in each mode (§14.1).
+

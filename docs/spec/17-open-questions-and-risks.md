@@ -14,7 +14,9 @@
 | Q-08 | Retention for closed member accounts: 2 years, then erase? | Yes, subject to legal | Phase 2 |
 | Q-09 | Guests booked with a member (`allow_guests`): how many, and paid how? | 1 guest per booking, paid by drop-in price | Phase 4 |
 | Q-10 | Minimum age for online booking, and how it is collected (D-31)? | 18; a date of birth at signup through the member sign-in service | Phase 2 |
-| Q-11 | Real issuer URLs, directory group names and BookingVendor/ShiftTool/PayrollCo API details | Collect at onboarding (the §4b.1 values are placeholders) | Phase 0 |
+| Q-11 | Real issuer URLs, directory group names (including the groups for `teacher` and `desk_staff`), and BookingVendor/ShiftTool/PayrollCo API details | Collect at onboarding (the §4b.1 values are placeholders) | Phase 0 |
+| Q-12 | Real desk shift start times per studio and weekday (§4b.1 `starts` are placeholders that fit the published hours) | Tenant ops to confirm before the first roster publish | Phase 1 |
+| Q-13 | Which system pays teaching hours today (BookingVendor export, or manual)? | Keep it until the classes cutover (D-36) | Phase 1 |
 
 ## 17.2 Risks
 

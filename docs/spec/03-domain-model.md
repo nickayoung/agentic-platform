@@ -142,13 +142,20 @@ interface Customer {
   linked_resource_id: Id<'res'> | null; // the same human as a staff member (§3.12.5)
   display_name: string; email?: string; phone?: string;  // PII (§13.3)
   timezone: IanaZone | null; home_location_key: ConfigKey | null;
-  tier_key: ConfigKey | null;           // derived: highest-rank tier among active entitlements
-  strikes: number;
+  tier_key: ConfigKey | null;           // derived: highest-rank tier among ACTIVE entitlements (frozen/past-due-expired contribute none)
+  strikes: number;                      // derived: count of CustomerStrike rows within the policy's strike_window
   waiver_signed_at: UtcMs | null;       // set via the waiver custom field (§4.12)
   custom: Record<string, AttrValue>; history: CustomerHistory;
   source: Source;
 }
 ```
+
+```ts
+interface CustomerStrike { id: Id<'stk'>; customer_id: Id<'cus'>; booking_id: Id<'bkg'>; at: UtcMs;
+  kind: 'late_cancel' | 'no_show'; removed_by: ActorRef | null; removed_at: UtcMs | null }
+```
+
+Strikes are rows, not a counter. `customer.strikes` (CEL, §5.3) counts the rows that are not removed and whose `at` is within the `strike_window` of the policy being evaluated (default 90 days). A manager can remove a strike with `DELETE /customers/{id}/strikes/{stk}`; the removal is audited.
 
 **I-09** A person is available for an interval when all three hold:
 - an `available` record covers the interval;
@@ -237,8 +244,9 @@ interface Booking {
          | { method: 'price'; amount: Money; processor_ref: string } | { method: 'none' };
   terms: TermsSnapshot; intake: Record<string, AttrValue>;
   booked_via: 'web' | 'desk' | 'portal' | 'agent' | 'mirror' | 'waitlist';
-  config_version: number; decision_id: Id<'dec'>; place_refilled: boolean; source: Source;
+  config_version: number; decision_id: Id<'dec'>; source: Source;
 }
+// `place_refilled` is NOT stored. It is computed when a penalty is assessed (§7.6) and exposed to CEL as booking.place_refilled.
 type BookingState = 'pending_approval' | 'confirmed' | 'cancelled' | 'late_cancelled'
                   | 'checked_in' | 'attended' | 'no_show' | 'rejected';
 
@@ -262,6 +270,7 @@ interface Offer {
   recipient: { customer_id: Id<'cus'> } | { resource_id: Id<'res'> };
   state: 'sent' | 'accepted' | 'declined' | 'expired' | 'withdrawn';
   expires_at: UtcMs; reply_text: string | null;   // free text from SMS/email replies (substitute)
+  hold_id: Id<'hld'> | null;                      // kind = place: hold created atomically by accept (§7.7)
   created_by: ActorRef; run_id: string | null;
 }
 
@@ -287,6 +296,7 @@ interface CheckIn { id: Id<'chk'>; booking_id: Id<'bkg'>; session_id: Id<'ses'>;
 | `confirmed` → `cancelled` | cancel before `free_cancel_until`, or staff waive | member, desk, agent (if zero-cost) | `release +n` | refund per `terms.refund.timely` |
 | `confirmed` → `late_cancelled` | cancel after `free_cancel_until` and before start | member (via confirmation if agent), desk | reserve held until assessment; then `forfeit` or `release` (§7.6) | fee per penalty |
 | `confirmed` → `checked_in` | check-in within the window | desk, instructor, member (kiosk/self) | — | — |
+| `no_show` → `checked_in` | an offline desk check-in replayed late, whose recorded `at` is inside the check-in window | desk app (offline queue) | penalty reversed (compensating rows, fee refund job); audited | refund fee |
 | `checked_in` → `attended` | session end + 15 min (timer) | system | `consume` (reserve becomes final) | — |
 | `confirmed` → `no_show` | start + `grace` with no check-in (timer) | system | penalty at `assess_at` | fee per penalty |
 | `no_show` → `attended` | correction within 24 h | desk, manager | reverse penalty with compensating rows | refund fee |
@@ -308,6 +318,8 @@ interface Entitlement {
 interface LedgerEntry { id: Id<'led'>; entitlement_id: Id<'ent'>; unit: ConfigKey; delta: number;
   kind: 'grant' | 'reserve' | 'consume' | 'release' | 'expire' | 'adjust' | 'refund' | 'forfeit' | 'transfer';
   booking_id: Id<'bkg'> | null; reason: string; actor: ActorRef; at: UtcMs; idempotency_key: string }
+// Unlimited balances (balance = null) still get reserve/consume/release/forfeit rows, with delta = 0,
+// so I-25 holds for every booking paid with units.
 ```
 
 - **I-24** A limited balance is ≥ 0 (a CHECK constraint) and equals the sum of the ledger.
@@ -319,12 +331,13 @@ interface LedgerEntry { id: Id<'led'>; entitlement_id: Id<'ent'>; unit: ConfigKe
 
 ```ts
 interface Proposal {
-  id: Id<'prp'>; kind: 'assignment_change' | 'roster_publish' | 'swap' | 'session_cancel' | 'refund' | 'credit_adjust';
+  id: Id<'prp'>; kind: 'assignment_change' | 'roster_publish' | 'swap' | 'session_cancel' | 'refund' | 'credit_adjust'
+      | 'domain_mode' | 'tenant_offboard';   // the last two implement the two-person rule: approver ≠ proposer, roles owner/admin
   proposed_by: ActorRef; ops: ProposalOp[];
   validation: { ok: boolean; reasons: ReasonCode[]; checked_at: UtcMs; config_version: number };
   state: 'pending' | 'approved' | 'rejected' | 'applied' | 'failed' | 'expired';
   approver_roles: PlatformRole[]; decided_by: ActorRef | null; decided_at: UtcMs | null;
-  expires_at: UtcMs;      // default: min(related deadline, now + 2h) for assignment_change; now + 72h otherwise
+  expires_at: UtcMs;      // default: min(session.start − 30m, now + 2h) for assignment_change; now + 72h otherwise
   version: number;        // optimistic concurrency for concurrent manager edits (§11.2 If-Match)
 }
 interface SwapRequest { id: Id<'swp'>; from_assignment_id: Id<'asg'>; to_resource_id: Id<'res'> | null;
@@ -409,10 +422,10 @@ This section is normative for how each entity begins, changes and ends. Endpoint
 
 | Stage | Behaviour |
 |---|---|
-| **Onboard** | The staff directory emits `person.created` (event delivered through the gateway; a nightly sync is the backstop). Kairos creates the person resource with `staff_key`, roles mapped from directory groups (§4.13), and `home_location_key` from the directory's location attribute. A manager completes skills and certifications with expiry dates (`PATCH /resources/{id}`), `payroll_ref`, and the calendar-sync opt-in. The person sets availability in the portal. They are eligible for rosters once they have ≥ 1 role and an availability record. The first assignment sends a welcome notification. The person is linked to BookingVendor's instructor ID through person mapping |
+| **Onboard** | The staff directory emits `person.created` (event delivered through the gateway; a nightly sync is the backstop). Kairos creates the person resource with `staff_key`, platform roles from `access.role_mappings` and config staff roles (`teacher`, `desk_staff`) from `access.staff_role_mappings` (§4.13), both re-applied on every sync, and `home_location_key` from the directory's location attribute. A manager completes skills and certifications with expiry dates (`PATCH /resources/{id}`), `payroll_ref`, and the calendar-sync opt-in. The person sets availability in the portal. They are eligible for rosters once they have ≥ 1 role and an availability record. The first assignment sends a welcome notification. The person is linked to BookingVendor's instructor ID through person mapping |
 | **Change** | *Role or skill change:* the effect is immediate on eligibility. Existing assignments that no longer pass the validator are flagged, the session goes to `needs_staff`, and the substitute flow runs. *Certification expiry:* a nightly job emits `skill.expiring` 30 days before and handles it as a skill removal at expiry. *Leave of absence:* a `TimeOff` with `reason: leave_of_absence`, same effect as a sick call over the range, but with manager approval first. *Availability change:* future assignments that fall outside the new availability are flagged to the manager (not auto-vacated). *Move studio:* `location_keys` changes; future assignments at the old studio are flagged. *Staff who are also members:* §3.12.5 |
-| **Offboard (planned)** | The directory or a manager sets `leaves_at` → state `leaving`. After `leaves_at`: assignments are vacated (substitute flow for classes, desk coverage re-solve proposal for shifts); open swaps are withdrawn; requested time off is cancelled; calendar entries after `leaves_at` are deleted |
-| **Offboard (immediate)** | The directory emits `person.deactivated`, or a manager calls `POST /resources/{id}/deactivate {effective: now}`. In one batch: state `inactive`; every assignment starting after now is vacated (substitute flow; a session starting within 2 h also creates a manager task); swaps are withdrawn; time off is cancelled. Token exchange refuses new tokens for the person at once. Existing staff JWTs are refused because the platform checks `state` on every request (cached ≤ 60 s). Agent tokens acting for them die within ≤ 15 min of TTL and are also checked against `state`. Calendar sync entries are deleted. Hours up to `effective` stay and go into the next export. Unexported records are flagged `final` |
+| **Offboard (planned)** | The directory or a manager sets `leaves_at` → state `leaving`. After `leaves_at`: assignments are vacated (substitute flow for classes, desk coverage re-solve proposal for shifts); open swaps are withdrawn; requested time off is cancelled; substitute offers to them are withdrawn; pending proposals assigning them are rejected; calendar entries after `leaves_at` are deleted. If classes are mirrored, use the per-mode write table in §18.5.1 |
+| **Offboard (immediate)** | The directory emits `person.deactivated`, or a manager calls `POST /resources/{id}/deactivate {effective: now}`. In one batch: state `inactive`; every assignment starting after now is vacated (substitute flow; a session starting within 2 h also creates a manager task); swaps are withdrawn; time off is cancelled; open substitute **offers to** the person are withdrawn; pending proposals that would assign them are rejected with reason `person_inactive`. Token exchange refuses new tokens for the person at once. Existing staff JWTs are refused because the platform checks `state` on every request (cached ≤ 60 s). Agent tokens acting for them die within ≤ 15 min of TTL and are also checked against `state`. Calendar sync entries are deleted. Hours up to `effective` stay and go into the next export. Unexported records are flagged `final` |
 | **History and rehire** | The resource row, assignments, hours and audit are kept (needed for payroll and audit). Personal fields (phone, personal email) are erased 90 days after offboarding unless a legal hold applies. Rehire reactivates the same resource through the same `staff_key`; skills must be re-verified |
 
 ### 3.12.5 Member (customer)
@@ -430,7 +443,7 @@ This section is normative for how each entity begins, changes and ends. Endpoint
 | **Credit expiry** | At `ends_at`: an `expire` ledger row for the remaining balance. Bookings already reserved keep their reserve. A booking for a session after `ends_at` was never allowed (I-26a) |
 | **Home-studio change** | `PATCH /customers/me {home_location_key}`. Display and default filters only |
 | **Suspension / ban** | `POST /customers/{id}/suspend {until?, reason, cancel_future: bool}` (manager). New bookings get `ACCOUNT_SUSPENDED`. If `cancel_future`, future bookings are cancelled timely with refunds |
-| **Staff who are also members** | `linked_resource_id` links the two identities (matched by verified email, confirmed by the person in the portal). A linked member's booking is refused with `CUSTOMER_OVERLAP` if it overlaps one of their own confirmed assignments (D-32). Permissions are never merged: a member token grants member rights only |
+| **Staff who are also members** | `linked_resource_id` links the two identities. Linking takes both tokens: the person starts with a staff token (`POST /resources/me/link-member {customer_id}`), then confirms with that member's token (`POST /customers/me/link-staff {link_id}`); verified emails must match. A linked member's booking is refused with `CUSTOMER_OVERLAP` if it overlaps one of their own confirmed assignments (D-32). Permissions are never merged: a member token grants member rights only |
 | **Close account** | `POST /customers/me/close`. Future bookings are cancelled as **timely** whatever the time, with refunds per `refund.timely`. Waitlist entries are removed. Memberships are cancelled at the processor via gateway at period end (members owner) or flagged to BookingVendor (mirror). → `closed` |
 | **Data export** | `POST /customers/{id}/export` → JSON of profile, bookings, ledger and consents, delivered within 30 days as a signed link through the notification service |
 | **Deletion (erasure)** | `POST /customers/{id}/erase`. The record must be `closed` first (closing is automatic). PII and custom-field values are erased and the row is pseudonymised. Bookings, ledger and payment references stay under the pseudonym for financial records (7 years) → `erased` |
