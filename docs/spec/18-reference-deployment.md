@@ -16,12 +16,12 @@ The gateway system keys are: `booking_vendor`, `shift_tool`, `payments` (the car
 
 ## 18.2 Onboarding the tenant
 
-The tenant is onboarded using the procedure in §3.12.1. Specific to this tenant:
+The tenant is onboarded using the procedure in §3A.3. Specific to this tenant:
 
 1. Config starts from `yoga_starter.yaml`. The owner's description (eval case Y-REF-01) is turned into `lotus_line.yaml`.
 2. All four domains start in `mirror`. ShiftTool backfills −8 to +8 weeks of desk shifts. BookingVendor backfills −26 weeks to +90 days of classes and bookings, plus all active members.
 3. Every BookingVendor instructor ID is mapped to a staff person, by email first and manually after that (§18.5). Go-live requires every mapping to be complete.
-4. The flag `sync.shifts.owner` is enabled only after the go-live checklist passes. That is the start of Phase 1 (§18.9).
+4. After the go-live checklist passes, Phase 1 starts: `shifts` goes mirror → **shadow** for 14 days, then → **owner** through the gate in §18.7 (flag `sync.shifts.owner`, D-47).
 
 ## 18.3 Fitting beside the shared services
 
@@ -52,9 +52,9 @@ None of the front ends contains scheduling logic. They render what the API retur
 | Timetable | `GET /sessions?…&include=availability`. Anonymous requests are edge-cached; signed-in requests get personalised eligibility and price |
 | Mat map | `GET /sessions/{id}/places`, showing mat states, partition badges and waitlist-reserved mats |
 | Book | `POST /holds` → quote and terms (waiver or intake if required) → `POST /bookings` (for price payments, the processor's hosted step comes first) |
-| Cancel | `POST /bookings/{id}/cancel?preview=true` → confirm |
+| Cancel | `POST /bookings/{id}/cancel {preview: true}` → shows the penalty → `POST /bookings/{id}/cancel` (or the confirmation flow for agents, §11.6) |
 | Waitlist | `POST /sessions/{id}/waitlist`. Offer links call `POST /offers/{id}/accept`, which returns a hold, then `POST /bookings` confirms |
-| Account page | `GET /customers/me`, bookings, entitlements, freeze, close account, export |
+| Account page | `GET /customers/me`, `GET /bookings?customer_id=me`, `GET /waitlist-entries?customer_id=me`, `GET /customers/me/entitlements`, `POST /entitlements/{id}/freeze`, `POST /entitlements/{id}/cancel`, `POST /customers/me/close`, `POST /customers/me/export` |
 | Checkout (packs and memberships) | Phases 1–4: BookingVendor's embedded checkout. Phase 5: processor checkout plus `POST /entitlements` |
 | AI chat assistant | Member support assistant (§18.4.4) |
 
@@ -64,10 +64,10 @@ None of the front ends contains scheduling logic. They render what the API retur
 |---|---|
 | Support inbox | The desk app owns the inbox. Kairos provides member context, decisions and H4 drafts |
 | Who is on the desk now | `GET /desk/now?location=` |
-| Today's classes and rosters | `GET /sessions?…&include=assignments,places_summary`, `GET /sessions/{id}/roster` |
+| Today's classes and rosters | `GET /sessions?…&include=assignments,places_summary`, `GET /sessions/{id}/roster`, `GET /sessions/{id}/waitlist` |
 | Check-ins | `POST /check-ins {client_key}`, with an offline queue in the desktop app. Walk-ins: `POST /customers` (guest) → hold and booking on the `desk` channel |
 | Checklists and reminders | `GET /tasks?list=desk_checklist…`, `POST /tasks/{id}/complete` |
-| Mat out of service | `POST /resources/{mat}/blocks?preview=true` → confirm |
+| Mat out of service | `POST /resources/{mat}/blocks {preview: true}` → shows re-seats → `POST /resources/{mat}/blocks` |
 
 ### Staff portal (web and phone app)
 
@@ -75,12 +75,14 @@ None of the front ends contains scheduling logic. They render what the API retur
 |---|---|
 | My shifts and classes | `GET /assignments?resource_id=me` (each item shows its `source`) |
 | Substitute offers | `GET /offers?recipient=me` → accept or decline |
-| Swaps | `POST /swaps` → accept → manager approval |
-| Time off and sick calls | `POST /time-off` (`immediate: true` for sick) |
-| Availability | `/resources/me/availability` |
+| Swaps | `POST /swaps` → `POST /swaps/{id}/accept` → manager `POST /swaps/{id}/approve` or `/reject` |
+| Time off and sick calls | `POST /time-off` (`immediate: true` for sick); managers `POST /time-off/{id}/approve` / `/reject` |
+| Availability | `GET`/`POST /resources/me/availability`, `DELETE /resources/me/availability/{avl}` |
 | Time clock (later) | `POST /time-clock/punches` |
 | **Managers:** desk roster | `POST /rosters/solve {scope: {roles: [desk_staff]}}` → proposal → `POST /proposals/{id}/ops` edits → approve = publish |
 | **Managers:** teacher schedule | Same flow with `roles: [teacher]`. Until classes are owned, the result is a set of write-through teacher changes to BookingVendor |
+| **Managers:** class edits | `PATCH /sessions/{id} {…, preview: true}` → impact → commit with `acknowledge` (§3A.9.2) |
+| **Managers:** hours | `GET /hours`, `PATCH /hours/{id}`, `POST /hours/{id}/approve`, exports (§18.8) |
 | **Managers:** studio closures, staff offboarding, member suspensions and merges | §11.3 |
 
 ### 18.4.4 Runtime agents
@@ -127,6 +129,8 @@ None of the front ends contains scheduling logic. They render what the API retur
 
 **Code mapping** (in `kairos-sync`): outside class types map to template keys (e.g. "VIN60" → `vinyasa_60`), and outside rooms map to room keys. An unmapped code raises `field_mismatch`, and the record is stored with `template_key = 'unmapped'`. Its room claim is still written.
 
+**Shift mapping** (H-26): a ShiftTool shift maps to the desk template whose `starts` entry matches its studio, weekday and local start time and whose `duration` equals the shift's length. Its worker maps through `staff_key`, and its desk lane claim goes on the studio's front desk. A shift that matches no template is stored with `template_key = 'unmapped'` and raises `field_mismatch`. Its worker claim is still written, so the shift keeps blocking the person's time.
+
 **Person mapping** (`person_mapping`, §3.11), for the teachers of mirrored classes:
 1. On the first sighting of a BookingVendor instructor ID, match it to a person by directory email. If exactly one person matches, the mapping is set with `match: email`.
 2. Otherwise the mapping is `unmatched`. The mirrored class is stored with `status = needs_mapping`, and an `unmapped_person` drift item alerts managers (§4b.1 `cross_domain_alert`).
@@ -135,19 +139,7 @@ None of the front ends contains scheduling logic. They render what the API retur
 
 ### 18.5.1 Staff and lifecycle writes by mode
 
-For each staff or lifecycle write, the table says what Kairos does when the affected domain is mirrored (shadow behaves as mirror for writes, §7.12), and when it is owned.
-
-| Write | Domain | Mirror / shadow | Owner |
-|---|---|---|---|
-| Sick call or time off: vacate **classes** | classes | Not done by Kairos. The portal shows "Arrange cover in BookingVendor" with a deep link. The mirrored claim remains until BookingVendor changes the class | Vacate → substitute flow (§8.6) |
-| Sick call or time off: vacate **desk shifts** | shifts | Write-through to ShiftTool (Phase 1 runs ShiftTool in push mode) | Vacate → `desk_vacated` workflow |
-| Substitute, or a teacher change from a roster solve | classes | Write-through `PATCH gateway/booking_vendor/classes/{id} {instructor}`, if BookingVendor supports it (A-03); otherwise not available | Native |
-| Studio closure | classes + shifts | Classes: write-through cancel per class, if supported; otherwise a manager task "cancel in BookingVendor" per class. Shifts: native | Native (§3.12.2) |
-| Room or mat block | classes | Write-through room change or capacity change, if supported; otherwise a manager task | Native (§3.12.3) |
-| Studio cancel (minimum attendance, unstaffed) | classes | Off (§7.13) | Native |
-| Member merge, suspend, close, freeze | members | Not available in Kairos. The UI links to BookingVendor | Native (§3.12.5) |
-| Member erase | members | Kairos erases its mirror copy and creates a manager task to erase in BookingVendor | Native |
-| Staff deactivation | shifts / classes | Owned shifts are vacated natively. Mirrored classes: a manager task per future class "reassign in BookingVendor", and the person's mirrored claims stay until BookingVendor changes them | Native for every owned domain |
+What Kairos does for each staff, member and lifecycle write in each mode is the domain-mode matrix in **§3A.2**. The cross-domain rule for events such as a class cancel while bookings are mirrored is §3A.1 C4.
 
 **Allowed mode combinations.** A domain may be `owner` only once its dependencies are `owner`:
 - shifts: no dependencies;
@@ -177,6 +169,15 @@ Every mode change is behind a flag and is audited. It follows the **two-person r
 - *Gate:* drift below 0.5 % for 7 days.
 - *Procedure:* turn the flag on.
 
+**What "disagreement" means per domain in shadow**
+
+| Domain | Kairos computes | A disagreement is |
+|---|---|---|
+| classes | Occurrences from the timetable; built-in cancels (minimum attendance, unstaffed) | An occurrence on one side only; a cancel decided on one side only |
+| bookings | The full pipeline for each write-through request; waitlist promotions; penalties; studio-cancel refunds | A different outcome (allowed vs denied), a different promoted member, a different fee or refund |
+| members | Entitlement coverage, expiry, freeze and past-due | A different coverage verdict or balance |
+| shifts | The person-rule validator on every ShiftTool shift and assignment; coverage per studio and day; hours per person and day | A ShiftTool assignment that the validator refuses (for example overlapping a mirrored class); a coverage shortfall ShiftTool doesn't show; hours that differ by more than 1 minute |
+
 **Shadow → owner (cutover)**
 - *Gate:* disagreement below 0.2 % for 14 days, all of it triaged; no drift item open more than 24 h; a preview rehearsal.
 - *Procedure:*
@@ -199,6 +200,8 @@ Every mode change is behind a flag and is audited. It follows the **two-person r
 - *Target:* ≤ 30 min.
 - *Ordering:* rolling back `classes` requires `bookings` to be in mirror or shadow first.
 
+**In-flight items** at a cutover or a rollback (holds, outside waitlists, pending penalties, imported terms, adoption of mirrored sessions into series, open proposals and offers) are handled per **§3A.18**.
+
 **Owner → retired**
 - *Gate:* at least 60 days in owner with no rollback, and owner sign-off.
 - *Procedure:* outside writes stop and the setting becomes `retired = true`. Rollback is no longer possible.
@@ -211,12 +214,7 @@ Kairos stops at hours. It never holds pay rates, computes pay, or calls Gusto. F
 
 ### 18.8.1 Hours records
 
-- **Lifecycle:**
-  1. **Created** for desk shifts and for teaching (mirrored or owned) when the assignment is confirmed.
-  2. **`worked`** once the session ends, or from time-clock punches.
-  3. **`approved`** by a manager, for each pay period.
-  4. **`exported`** once the period's export includes them.
-- **Voided records:** studio closures may void them (§3.12.2).
+- **Lifecycle:** §3A.16. In short: records exist only for assignments in **owned** domains (desk shifts from the shifts cutover, teaching from the classes cutover, D-54); they are voided when the assignment is vacated or the session cancelled, unless the cancel was within `closure_pay_notice` (`pay_protected`, D-55); they become `worked` at session end, `approved` by a manager, and `exported` when the period is submitted.
 - **Offboarded staff:** their hours up to the effective date are included and flagged `final` in the export summary.
 - **Approval gate:** the export only includes `approved` records. If any record in the period is still `worked`, the export reports it, and the manager approves those records or excludes them explicitly.
 
@@ -298,10 +296,10 @@ The cutover date is an export boundary: hours whose `scheduled_start` is before 
 
 | Phase (§15) | classes | bookings | members | shifts |
 |---|---|---|---|---|
-| 1 | mirror | mirror | mirror | **owner** (ShiftTool kept current by push for 60 days) |
+| 1 | mirror | mirror | mirror | **shadow** (14 days) → **owner** (ShiftTool kept current by push for 60 days) |
 | 2 | shadow | shadow | mirror | owner |
 | 3 | **owner** | shadow | mirror | owner (ShiftTool retired) |
 | 4 | owner | **owner** | mirror | owner |
 | 5 | owner | owner | shadow → **owner** | owner (BookingVendor retired after 60 days) |
 
-**Phase 1 is the acceptance-test configuration.** Classes are mirrored while desk shifts are owned. Appendix A.5 shows the refusal in both orders.
+**Phase 1, after the shifts cutover, is the acceptance-test configuration.** Classes are mirrored while desk shifts are owned. Appendix A.5 shows the refusal in all three orders. The refusal also holds during the 14-day shifts shadow, because the validator is always on (§3A.2). There it is reported as a disagreement on ShiftTool's shift rather than a refused Kairos write.

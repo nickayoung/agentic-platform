@@ -18,12 +18,13 @@ These checks use only the schema (§4), the reference config (§4b.1) and the en
 | Refunds | `refund: { timely: full, studio_cancel: full }` | §7.6 |
 | Limits; minimum attendance; unstaffed | `limits`, `min_attendance`, `unstaffed` | Built-in timers (§7.1) |
 | Waitlist auto, then offers | `waitlist.schedule` | §7.7 |
-| Unlimited (freeze), 10-pack, intro month (first use) | `entitlement_products` | §7.4.1, §3.12.5 |
-| Desk shifts and coverage | `kind: shift`, `participants: none`, `rostered`, `coverage` | CP-SAT (§8.3) |
-| Labour and teaching rules | `constraints` | §8.3, §8.5 |
-| Substitute search, member notices | `workflows` | §9 |
+| Unlimited (freeze), 10-pack, intro month (first use) | `entitlement_products` | §7.4.1, §3A.7 |
+| Desk shifts and coverage, with handover overlap | `kind: shift`, `participants: none`, `rostered`, `coverage`; 2-lane desks | CP-SAT (§8.3); lane-aware `COVERAGE_UNCOVERABLE` (§6.3) |
+| Labour and teaching rules, including "10 h between a closing and the next opening" | `constraints`; `desk_rest` uses `min_rest.from: closing`, `to: opening` | §8.3, §8.5 |
+| Late-cancel refunds for drop-ins | `refund.late: none` | §7.6 |
+| Substitute search, member and staff notices | `workflows`, default `scope: owned` | §9, §3A |
 
-No business-specific code is involved. The engines never read `kind` (lint, §14.1).
+No business-specific code is involved. The engines never read `kind` (lint, §14.1). A script that runs the lane-aware coverage check over every studio and weekday of §4b.1 finds every interval coverable with 2-lane desks, and finds Dumbo uncoverable with 1 lane, which is why D-45 sets 2 lanes.
 
 ## A.2 Mat-hold race: **Pass**
 
@@ -48,6 +49,8 @@ The full timeline is in §9.6.
 - **Gate down.** Every freeing path runs `release_place`, so the mat is still reserved for the waitlist. The promotion sweep promotes within about 90 s (§7.7).
 - **Mode.** All of this is built-in behaviour that needs `bookings = owner` (§7.13), so the trace applies from Phase 4. Before that, BookingVendor runs its own waitlist and Kairos dry-runs this logic in shadow mode.
 - **Promoted member has no credits.** They are `skipped` (`INSUFFICIENT_UNITS`), `skipped_notice` emails them, and the next member is promoted. If nobody is eligible, the reservation is cleared.
+- **Price-paid canceller.** No units and no fee. `refund.late: none`, so no refund even when refilled; `booking.penalty_assessed{waived: true, refund: none}` (D-48).
+- **Front row before release.** The place is reserved only because an unlimited member (Eli) is waiting, and Eli is promoted while Dana keeps her position (D-59).
 - **Notifications.** The `promoted_notice`, `offer_notice` and `skipped_notice` workflows call the notification service through the outbox, keyed by idempotency key.
 
 ## A.4 Instructor sick call: **Pass**
@@ -59,14 +62,18 @@ Maya is rostered for Tue 18:00 Hot 75 at Park Slope. At 12:00 she submits a sick
 | 12:00:00 | `POST /time-off {sick, immediate}` | One batch releases Maya's assignment and claim, sets the session to `needs_staff`, and emits `assignment.vacated`. Members keep their bookings. |
 | 12:00:01 | `sub_finder` workflow → H3 | Deadline = 18:00 − 2 h = 16:00. The unstaffed check is at 16:30 |
 | 12:00:02 | **Candidate query** `GET /sessions/{id}/substitutes?requirement=teacher` | The validator keeps only `teacher` people with an unexpired `hot_cert` who are available, have no overlapping claim in any domain (including desk shifts and mirrored classes), and satisfy `teach_rest`, `teach_day` and transfer time. Ranked: Leo (fewest minutes this week), Ana (has taught this slot 9 times), Ravi |
-| 12:00:03 | **Outreach** `POST /offers` ×3, in rank order, at once | The class starts within 6 h, so each offer expires at 12:10 (D-33). Messages go through the notification service. No quiet hours apply. |
+| 12:00:03 | **Outreach** `POST /offers` ×3, in rank order, at once | `start − now = 6h ≤ 6h`, so each offer expires at 12:10 (D-33). Each `offer.sent` triggers `substitute_offer_notice`, which texts the teacher through the notification service. No quiet hours apply. |
 | 12:10 | All three offers expire | The next wave fetches candidates again. None are left, so the run ends `exhausted` and emits `custom.substitute_exhausted`. A manager task is created. |
-| *(Alternative)* 12:04 | Ana taps Accept (`POST /offers/{id}/accept`) | A `Proposal` is created and validated. The other offers are withdrawn. The proposal `expires_at` is 14:04 (`min(start − 30m, now + 2h)`). |
-| *(Alternative)* 12:15 | Manager approves | Re-validation passes (with the `resource_day` guards and a scalar assert). Ana's claim is written, the session returns to `scheduled`, and `sub_assigned_notice` notifies members. If Ana became busy before approval, the commit fails with `RESOURCE_CONFLICT`, the proposal moves to `failed`, and outreach continues. |
-| *(Alternative)* 15:58 | Ravi accepts during a late wave | The proposal is pending at 16:30, so the check is deferred to `min(proposal.expires_at, 17:30)` = 17:30, and approvers get an urgent notification. If it is approved, the class runs. |
+| *(Alternative)* 12:04 | Ana taps Accept (`POST /offers/{id}/accept`) | One engine batch: offer → `accepted`, a `Proposal` is created and validated, and Leo's and Ravi's offers → `withdrawn` (they get `substitute_filled_notice`). If Leo taps Accept in the same instant, the unique index gives him `409 OFFER_FILLED` (D-57). The proposal `expires_at` is 14:04 (`min(start − 30m, now + 2h)`); `approval_needed` tells the managers. |
+| *(Alternative)* 12:15 | Manager approves | Re-validation passes (with the `resource_day` guards and a scalar assert). Ana's claim and hours record are written, the session returns to `scheduled`, and `sub_assigned_notice` notifies members. If Ana (who also has the `desk_staff` role in that variant) was given the 16:00 desk shift before approval, the commit fails with `RESOURCE_CONFLICT`, the proposal → `failed`, her offer → `lapsed`, and outreach continues. |
+| *(Alternative)* 15:50–15:58 | A manager sends Ravi an offer at 15:50; he accepts at 15:58 | The proposal (expires 17:30) is pending at 16:30, so the check is deferred once to `min(17:30, 17:30)` = 17:30, and `proposal.urgent` triggers `approval_urgent` (SMS and staff chat). If it is approved before 17:30, the class runs. |
 | 16:30 | **Unstaffed check** (built-in, `unstaffed.check_at: 90m`) | The slot is empty and no proposal is pending, so the class is cancelled with `reason: no_staff`. **Members:** every booking is cancelled, credits are released, price-paid bookings get full refunds through the gateway, waitlist entries expire, and `no_sub_notice` texts everyone. |
 
-This trace needs `classes = owner` (Phase 3 onwards, §7.13). In Phases 1–2, Maya's sick call vacates only her owned desk shifts. Cover for her class is arranged in BookingVendor (§18.5.1), and her mirrored class claim keeps blocking that time for desk assignments.
+The table above is the trace with **every domain owned** (Phase 4 onwards for the member effects).
+
+**Phase 3 (`classes = owner`, `bookings = shadow`).** Everything up to 16:30 is identical. At 16:30 the unstaffed check cancels the session in Kairos (claims released, Maya's voided hours stay voided, timers cancelled) and pushes `cancel` to BookingVendor with key `cancel:{session}` (§3A.9.4, D-44). Kairos writes no booking, ledger, refund or member-notify rows: `no_sub_notice` resolves to nobody because bookings aren't owned (D-51). BookingVendor cancels the 20 bookings, refunds the 4 drop-ins and texts members (A-15), and its cancellations are mirrored back. Shadow compares that outcome with Kairos's dry-run studio cancel. If the push fails 3 times (by about 16:40), `push_failed` drift raises the urgent manager task and the staff-chat page.
+
+**Phases 1–2 (`classes = mirror`).** Maya's sick call vacates only her owned desk shifts. Cover for her class is arranged in BookingVendor (§3A.2), and her mirrored class claim keeps blocking that time for desk assignments.
 
 ## A.5 Classes mirrored, desk shifts owned: **Pass**
 
@@ -90,6 +97,7 @@ Configuration: Phase 1, with `classes = mirror` and `shifts = owner`.
 4. A `cross_domain_conflict` drift item and the `cross_domain_alert` workflow notify managers and create a task within 60 s. The desk app shows the conflict.
 5. No new claim can use Priya's time 08:50–10:10: those grains are held by D1, and C2 keeps them reserved for itself.
 6. The manager resolves it, typically with a proposal that moves Priya's desk shift. D1's release batch re-homes C2's grains, and C2 becomes `active`. D1 is not vacated automatically (D-34, Q-05).
+7. While D1 stands, a further desk shift for Priya at 11:00 (11:00–15:00) is refused with `RESOURCE_CONFLICT`, because it overlaps D1 itself. A 16:00 desk shift is accepted: it overlaps neither D1 nor the class, and `desk_rest` applies only from a closing shift to an opening one (D-46).
 
 **Order 3: teacher unmapped.**
 

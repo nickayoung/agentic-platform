@@ -25,10 +25,7 @@
 - approval timeouts;
 - refunds.
 
-Workflows (§9) only add reactions such as notifications, tasks and hooks. They never re-implement policy. **Built-in behaviour runs only on records whose domain Kairos owns** (§7.13). Two built-in timers run per session:
-
-- **Minimum attendance**, at `min_attendance.check_at`. If `booked_count < min`, the session is cancelled with `reason: under_minimum` and refunds per `refund.studio_cancel`.
-- **Unstaffed check**, at `unstaffed.check_at`. If any `roster` requirement is empty, the session is cancelled with `reason: no_staff` (or staff are notified, per the policy).
+Workflows (§9) only add reactions such as notifications, tasks and hooks. They never re-implement policy. **Built-in behaviour runs only on records whose domain Kairos owns** (§7.13, §3A.2). Two built-in timers run per session: **minimum attendance** and the **unstaffed check**. Their rules, including the deferral for a pending substitute proposal, are in §3A.9.5, and the cancel they perform is §3A.9.4.
 
 ## 7.2 Availability for classes
 
@@ -60,7 +57,7 @@ When a session is materialised, its places are created from its capacity mode:
 |---|---|---|
 | 1 | Actor may act for this member (self; staff with a role at this studio; agent `on_behalf_of` this member); member `state = active` | `FORBIDDEN`, `ACCOUNT_SUSPENDED` |
 | 2 | Domain routing: if `bookings` is in mirror or shadow mode, take the write-through path (§7.12). If its `write_freeze` is set, return `WRITE_FROZEN` with `Retry-After` | `WRITE_FROZEN` |
-| 3 | Session is `scheduled`, `needs_staff` or `needs_mapping` (mirrored; bookings are written through, so mapping doesn't matter to members), and has not started | `SESSION_NOT_BOOKABLE` |
+| 3 | Session is `scheduled`, `needs_staff` or `needs_mapping` (mirrored; bookings are written through, so mapping doesn't matter to members), has not started, and is not `over_capacity` (§3A.9.3) | `SESSION_NOT_BOOKABLE`, `SESSION_FULL` |
 | 4 | Booking window: `opens ≤ now < closes` | `WINDOW_NOT_OPEN`, `WINDOW_CLOSED` |
 | 5 | `template.eligible_if` and `policy.eligible_if` pass | `NOT_ELIGIBLE` |
 | 6 | No duplicate booking (I-21). If `customer_overlap = forbid`, no overlapping booking, and for linked staff no overlapping assignment of their own | `ALREADY_BOOKED`, `CUSTOMER_OVERLAP` |
@@ -146,19 +143,18 @@ One batch, in this order:
 | Case | Condition | Effect (one batch) | Deferred |
 |---|---|---|---|
 | Timely | `now < terms.free_cancel_until` | `cancelled`; place claim deleted; `release` ledger row; counters −1; refund per `terms.refund.timely` (`full` → outbox refund; `credit` → grant a 1-credit pack; `none` → nothing); place released (§7.7) | — |
-| Late | `free_cancel_until ≤ now < start` | `late_cancelled`; place claim deleted; counters −1; place released (§7.7) | Penalty at `terms.late_penalty.assess_at` |
+| Late | `free_cancel_until ≤ now < start` | `late_cancelled`; place claim deleted; counters −1; place released (§7.7). Price-paid: no refund now | Penalty at `terms.late_penalty.assess_at`; price-paid refund decided then (`terms.refund.late`) |
 | After start | `now ≥ start` | Members get `TOO_LATE_TO_CANCEL`. Staff may cancel with `penalty: apply \| waive` | — |
-| Studio cancel | Session cancelled (unstaffed, closure, minimum attendance, staff) | Every booking → `cancelled`; `release`; full refund; late fees already charged for this session reversed | — |
+| Studio cancel | Session cancelled (unstaffed, closure, minimum attendance, staff) | Bookings domain owned: every booking → `cancelled`; `release`; full refund; late fees already charged for this session reversed. Not owned: the outside system does this (§3A.9.4, D-44) | — |
 
 **Penalty assessment**, which runs immediately or from a timer at session start or end:
 
 1. Evaluate `waive_if` against the booking at that moment. `booking.place_refilled` is true when that booking's place is held by another **confirmed** booking at that moment.
-2. If waived: write a `release` row (credit back) and charge no fee.
-3. If not waived:
-   - when `forfeit_units`, write a `forfeit` row;
-   - when there is a `fee` and `fee_if` is true, create an outbox fee job keyed `fee:{booking}:{late|no_show}`;
-   - add the policy's `strikes`.
-4. Emit `booking.penalty_assessed`.
+2. **Units** (`payment.method = units`): if waived, write a `release` row (credit back); if not waived and `forfeit_units`, write a `forfeit` row.
+3. **Fee:** if not waived, and there is a `fee` and `fee_if` is true, create an outbox fee job keyed `fee:{booking}:{late|no_show}`.
+4. **Strikes:** if not waived, add the policy's `strikes`.
+5. **Price-paid late cancel** (`payment.method = price`): if `terms.refund.late = as_timely_if_refilled` and `place_refilled` is true, create a refund job per `terms.refund.timely`, keyed `refund:{booking}:late`. Otherwise no refund. `waive_if` doesn't decide refunds; it only cancels penalties (D-48).
+6. Emit `booking.penalty_assessed{waived, fee, refund}`.
 
 **No-show.** At `start + grace`, a timer marks every confirmed booking that hasn't checked in as `no_show`. The penalty follows at `assess_at`. Staff can correct a no-show within 24 h, which writes compensating ledger rows and a refund job. At `end + 15m`, checked-in bookings become `attended` and their reserved units are consumed.
 
@@ -173,7 +169,7 @@ One batch, in this order:
 
 `position = max + 1`, assigned in the gate batch. The body may carry `preferred_place_ids`, `auto_charge_consent` and `payment_method_ref`.
 
-**Priority over new bookings (D-27).** Any batch that frees a place (cancellation, hold expiry, partition release, capacity increase, re-seat) checks whether the session has `waiting` entries and the mode is not `closed`. If so, the same batch sets `place.reserved_for = 'waitlist'`. The hold SQL (§7.5.2, assert 3) then refuses that place to anyone who doesn't hold an active place offer. This is enforced in the database, so it holds even when the gate is down.
+**Priority over new bookings (D-27).** Any batch that frees a place (cancellation, hold expiry, partition release, capacity increase, re-seat) checks whether the session has `waiting` entries and the mode is not `closed`. If so, and at least one waiting entry passes the place's partition `eligible_if` (evaluated in the read phase, D-59), the same batch sets `place.reserved_for = 'waitlist'`. A front-row place freed before its release time is therefore not reserved for a waitlist of non-unlimited members. The hold SQL (§7.5.2, assert 3) then refuses that place to anyone who doesn't hold an active place offer. This is enforced in the database, so it holds even when the gate is down.
 
 **Freeing a place.** Every path that frees a place goes through one routine, `release_place(session, place)`, inside the batch that frees it. That covers cancellation, hold expiry (alarm **or** the 1-minute sweep, §12.4), partition release, capacity increase and re-seat. The routine sets `reserved_for` (D-27) and emits `place.released`.
 
@@ -189,7 +185,8 @@ auto_promote:
     if none: continue
     result ← pipeline steps 3, 5–10 for entry.customer with that place, channel 'waitlist' (step 4 skipped)
     payment: units → reserve; price → only if auto_charge_consent && payment_method_ref
-             (charge via gateway with idempotency key = entry id); otherwise treat as not allowed → offer instead
+             (charge via gateway with idempotency key = entry id; a declined charge → skipped, PAYMENT_FAILED);
+             otherwise treat as not allowed → offer instead
     allowed → one batch: booking confirmed (booked_via=waitlist), place.reserved_for=NULL, entry → promoted,
               emit booking.confirmed; stop
     not allowed → entry → skipped (reason recorded), emit waitlist.skipped{reason}; continue
@@ -209,7 +206,7 @@ Promotion never creates a hold. An auto-promoted member is booked directly, and 
 
 ## 7.8 Approval
 
-A booking that needs approval is created as `pending_approval`. The place is claimed and units are reserved. A timer applies `on_timeout`. Approvers use `GET /approvals` and `POST /approvals/{id}/decide`. A rejection releases everything, as for a timely cancellation.
+A booking that needs approval is created as `pending_approval`. The place is claimed and units are reserved. A timer applies `on_timeout` at `min(created + timeout, session.start)`; a booking still pending at session start is always rejected (D-58). Approvers use `GET /approvals` and `POST /approvals/{id}/decide`. A rejection releases everything, as for a timely cancellation (§3A.12.4).
 
 ## 7.9 Reason codes
 
@@ -229,6 +226,11 @@ A booking that needs approval is created as `pending_approval`. The place is cla
 | `PLACE_TAKEN` / `PLACE_NOT_ELIGIBLE` / `SESSION_FULL` | Place checks | "That mat was just taken. Mat 18 is free." |
 | `INTAKE_REQUIRED` | Intake fields missing | "Please complete: …" |
 | `HOLD_EXPIRED` | Hold timed out | "Your hold expired." |
+| `SESSION_CHANGED` | The session was retimed or moved after the hold was made (§3A.9.2) | "This class changed. Please review it again." |
+| `MOVE_NOT_ALLOWED` | A move after `free_cancel_until` (D-50) | "It's too late to move this booking. You can cancel it instead." |
+| `OFFER_FILLED` | Another substitute accepted first (§3A.14) | "Thanks, this class has already been covered." |
+| `PAYMENT_FAILED` | An auto-charge for a waitlist promotion was declined | "We couldn't charge your saved card." |
+| `IMPACT_UNACKNOWLEDGED` | A session edit has impact groups that weren't acknowledged (§3A.9.2) | — |
 | `TOO_LATE_TO_CANCEL` | Class has started | — |
 | `CONFIRMATION_STALE` | Agent confirmation no longer matches (§11.6) | "Details changed. Please review again." |
 | `RESOURCE_CONFLICT` | Occupancy collision | "{person} is already booked {when}." |
@@ -281,16 +283,9 @@ While `bookings` (or `members`, for debits) is not `owner`:
 
 Kairos must never act on a record that an outside system owns. Each built-in behaviour therefore runs only when the domain it acts on is `owner`. In `shadow` mode it runs as a **dry run**: the decision is computed and logged as a `ShadowDisagreement` when it differs from the outside system, and nothing is written. In `mirror` mode it does not run at all.
 
-| Behaviour | Needs owner | In shadow | In mirror |
-|---|---|---|---|
-| Session materialisation from the timetable | `classes` | dry run (compares occurrences) | off; sessions come from the mirror |
-| Minimum-attendance cancellation, unstaffed cancellation, partition release timers | `classes` | dry run | off |
-| Waitlist reservation and promotion, offers | `bookings` | dry run | off; the outside system runs its waitlist |
-| No-show marking, penalty assessment, fees, refunds | `bookings` | dry run | off |
-| Approval timeouts | `bookings` | dry run | off |
-| Entitlement expiry, freeze, past-due handling | `members` | dry run | off |
-| Desk-shift materialisation, coverage, roster publish | `shifts` | dry run | off |
-| Person-rule validator on Kairos-originated writes | always on | always on | always on (this is what refuses the desk shift in A.5) |
+**Events that span two domains** (for example a class cancel, which touches `classes` and `bookings`) run natively only for the owned domain. For a domain Kairos doesn't own, it pushes its owned change and lets the outside system apply the consequences (§3A.1 C4, D-44). In Phase 3, an unstaffed cancel therefore cancels the class in Kairos and pushes the cancel to BookingVendor, which cancels, refunds and notifies its bookings.
+
+The full matrix of what Kairos does per event and per mode is **§3A.2**. The person-rule validator on Kairos-originated writes is always on in every mode; this is what refuses the desk shift in A.5.
 
 The timers are still **scheduled** in mirror and shadow modes, so that switching a domain to `owner` needs no back-fill. When a timer fires, it checks the domain mode at that moment. Tests cover each row in each mode (§14.1).
 

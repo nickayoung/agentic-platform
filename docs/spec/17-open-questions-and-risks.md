@@ -20,6 +20,10 @@
 | Q-14 | The exact header rows of the tenant's Gusto employee and contractor CSV templates, and which column Gusto matches people on (employee ID or name) | Download both templates in Gusto at onboarding and copy the headers into `payroll_export.template_headers`; set `payroll_ref` per person | Phase 1 |
 | Q-15 | Are teachers employees or contractors in Gusto? Are any desk staff contractors? | Set `payroll_type` per person at onboarding | Phase 1 |
 | Q-16 | Do teaching and desk work have different pay rates in Gusto, and how does the employee template take hours per rate or job? | If yes, `split_by_kind: true`, with one row per kind mapped to the Gusto job; confirm against the template | Phase 1 |
+| Q-17 | Can two people work the Dumbo desk at once during a handover (D-45, A-16)? | Yes: 2 lanes | Phase 1 |
+| Q-18 | Should a drop-in who cancels late be refunded if the mat is refilled (D-48)? | No (`refund.late: none`) | Phase 2 |
+| Q-19 | When BookingVendor cancels bookings for a class Kairos cancelled, does it notify members and refund in full (A-15)? | Confirm against the sandbox before Phase 3 | Phase 3 |
+| Q-20 | Are teachers paid for a class cancelled for low attendance at T−2h (`closure_pay_notice` 2 h, D-55)? | Not at exactly 2 h; pay only for cancels under 2 h | Phase 3 |
 
 ## 17.2 Risks
 
@@ -35,3 +39,5 @@
 | R-08 | Agents mis-explain policy | M | M | Policy text rendered from config; H2 checker; confirmations |
 | R-09 | Rollback fails after a long time in owner mode | M | H | Continuous push with verification; rehearsals; retire only after 60 days |
 | R-10 | Small team working mostly through coding agents | H | M | Typed contracts, fixtures, scenario DSL, property tests, assert lint |
+| R-11 | A Phase 3 class cancel push fails and members arrive to a cancelled class | L | H | Push retries within 10 min, then an urgent task and a non-rate-limited staff page (§3A.9.4) |
+| R-12 | §3A grows out of step with the mechanisms in §7–§12 | M | M | One test file per lifecycle card (§14.1); a card change requires its test change in the same PR |

@@ -5,3 +5,4 @@ Kairos for yoga studios: a scheduling platform that a multi-studio yoga business
 - Technical specification: [docs/spec/README.md](docs/spec/README.md)
 - Config fixtures: [fixtures/configs/](fixtures/configs/) · Gusto CSV example: [fixtures/exports/](fixtures/exports/)
 - Configuration-agent eval cases: [evals/config-agent/cases.yaml](evals/config-agent/cases.yaml)
+- Reviews: [docs/reviews/](docs/reviews/) (review 3 and the v3.0 revision notes)

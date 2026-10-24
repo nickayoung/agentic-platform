@@ -19,7 +19,7 @@ All agents use `@kairos/agent-tools`, which is generated from the OpenAPI spec, 
 | Untrusted input | Member messages, help articles and email bodies go to the model as delimited data. Tool outputs are typed |
 | PII minimisation | Member-facing agents never see staff contact details. Fields with `pii: true` are redacted unless the agent has `pii:read` (staff assistant only, own studio only) |
 | Rate limits | Member assistant: 30 writes per member per hour. Substitute finder: 20 offers per slot. Staff assistant: 60 proposals per person per hour |
-| Kill switch and revocation | Flag `agent.<name>.enabled`. `DELETE /agents/clients/{id}` revokes the client credential immediately. Outstanding tokens expire within 15 minutes and fail the per-request client check before then (§3.12.6) |
+| Kill switch and revocation | Flag `agent.<name>.enabled`. `DELETE /agents/clients/{id}` revokes the client credential immediately. Outstanding tokens expire within 15 minutes and fail the per-request client check before then (§3A.8) |
 | Audit | `run_id`, prompt hash and tool-call sequence, for every call |
 | Deterministic fallback | Every hook has a non-LLM fallback, so booking never depends on an LLM |
 
@@ -69,18 +69,17 @@ output: { status: 'filled' | 'proposed' | 'exhausted' | 'deadline_passed'; propo
 | `get_substitute_candidates` | `GET /sessions/{id}/substitutes?requirement=` |
 | `send_offer` | `POST /offers {kind: substitute, session_id, requirement_key, resource_id, expires_at, note?}` |
 | `get_offer` | `GET /offers/{id}` |
-| `record_reply` | `POST /offers/{id}/reply {text, interpreted: accept \| decline \| conditional}` |
+| `record_reply` | `POST /offers/{id}/reply {text, interpreted: accept \| decline \| conditional}`. `accept` runs the engine's accept batch (which creates the proposal, §3A.14); `decline` declines; `conditional` creates a manager task with the text and leaves the offer `sent` |
 | `withdraw_offer` | `POST /offers/{id}/withdraw` |
-| `create_proposal` | `POST /proposals` |
 | `create_task` | `POST /tasks` |
 | `emit_exhausted` | `POST /events/custom {name: substitute_exhausted}` (agent-scoped) |
 
 **Behaviour.**
 1. Fetch candidates.
 2. Offer the top *k* in rank order. Each offer's expiry follows D-33.
-3. When an offer is accepted, `offer.accepted` fires. Create the proposal, then withdraw the other open offers with a "filled, thanks" message.
+3. When an offer is accepted, the engine has already created the proposal and withdrawn the other open offers in the accept batch (D-57). H3 only observes `offer.accepted` and `proposal.created`, records them in the run, and stops sending offers while the proposal is pending. Each withdrawn offer emits `offer.withdrawn{reason: filled}`, and the `substitute_filled_notice` workflow sends the fixed "filled, thanks" template.
 4. On a decline or expiry, offer the next candidate. Re-fetch candidates before every wave.
-5. If the proposal expires unapproved (I-28a), resume outreach.
+5. If the proposal fails, is rejected or expires unapproved (I-28a), the offer becomes `lapsed` and H3 resumes outreach from a fresh candidate list.
 6. At the deadline, or when no candidates remain, end the run as `deadline_passed` or `exhausted`. Create a manager task and emit `custom.substitute_exhausted`. The built-in unstaffed check then decides the class's fate (§8.6 step 7).
 
 **Guardrails.**

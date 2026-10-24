@@ -26,7 +26,7 @@ On every request, Kairos also checks the person's or member's `state` (cached fo
 
 **Service and agent tokens.** A service or agent client presents its credential to Kairos's token exchange and receives a token valid for ≤ 15 minutes. The credential lives in the client's own secret store. An agent token carries `on_behalf_of`, and its effective permissions are the intersection of the principal's permissions and the agent's allowlist.
 
-**Staff who are also members.** These are two identities from two sign-in services. They can be linked (§3.12.5), but their permissions are never merged.
+**Staff who are also members.** These are two identities from two sign-in services. They can be linked (§3A.7), but their permissions are never merged.
 
 **Permission matrix.** `L` = only within the role's locations. `self` = own records only.
 
@@ -37,7 +37,7 @@ On every request, Kairos also checks the person's or member's `state` (cached fo
 | Waive penalties | ✓ | ✓ | L | L (≤ 1 credit / $15) | — | — | — | — | propose | — |
 | Check in | ✓ | ✓ | L | L | own classes | self (kiosk) | — | — | — | — |
 | Edit sessions, closures, blocks | ✓ | ✓ | L | blocks (mats) | — | — | — | — | propose | — |
-| Assign staff, publish roster | ✓ | ✓ | L | — | — | — | — | — | propose | propose |
+| Assign staff, publish roster | ✓ | ✓ | L | — | — | — | — | — | propose | — (offers only; the engine creates the proposal on accept, D-57) |
 | Approve proposals | ✓ | ✓ | L | desk-level kinds | — | — | — | — | — | — |
 | Own availability, time off, swaps, offers | ✓ | ✓ | ✓ | self | self | own place offers | — | — | propose for self | create substitute offers |
 | Offboard staff | ✓ | ✓ | L | — | — | — | — | — | — | — |
@@ -57,19 +57,20 @@ On every request, Kairos also checks the person's or member's `state` (cached fo
 | Waivers and consents | Legal record of consent | 7 years after last visit |
 | Intake fields (`pii: true`) such as injuries and due date | Teacher safety | `retention` per field (26–52 weeks) |
 | Bookings, ledger, payment references (processor IDs, never card data) | Financial records | 7 years, pseudonymised after erasure |
-| Staff personal fields | Contact, scheduling | 90 days after offboarding (§3.12.4) |
+| Staff personal fields | Contact, scheduling | 90 days after offboarding (§3A.6) |
 | Staff assignments and hours | Payroll and audit | 7 years |
 | Gusto CSV export files (names, payroll IDs, hours) | Manager upload to Gusto | 30 days; signed download links valid 24 h; every download audited |
 | Agent transcripts | Debugging, evals | 30 days |
 
-- **Encryption:** application-layer encryption with a per-tenant data key (AES-256-GCM), wrapped by Kairos's secret store and rotated yearly. Destroying the key crypto-shreds the tenant (§3.12.1).
-- **Export and erasure** for members: §3.12.5. Kairos stores no card data at any point (§7.5.4).
+- **Encryption:** application-layer encryption with a per-tenant data key (AES-256-GCM), wrapped by Kairos's secret store and rotated yearly. Destroying the key crypto-shreds the tenant (§3A.3).
+- **Export and erasure** for members: §3A.7. Kairos stores no card data at any point (§7.5.4).
 
 ## 13.4 Audit log
 
 - **What is recorded:** every state change, with the actor (including `on_behalf_of` and `run_id`), action, target, prior-state hash, new state (PII redacted), `request_id` and `config_version`.
 - **Tamper evidence:** each entry's hash is `sha256(prev_hash ‖ entry)`. The chain is verified daily, and the day's head hash is published to a write-once archive.
 - **Never pruned:** config publications, approvals, domain-mode changes, flag changes, waivers, ledger adjustments, agent writes, offboarding and erasure.
+- **Per event:** each lifecycle card in §3A names what its audit entry records beyond the defaults (§3A.1 C1).
 - **Readers:** owner and admin see everything. Managers see entries for their locations. Retention is 7 years.
 
 ## 13.5 Configuration safety

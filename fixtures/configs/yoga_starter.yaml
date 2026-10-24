@@ -1,5 +1,5 @@
 # Generated from docs/spec/04b-example-configs.md — keep in sync (CI diff check, §14.2).
-schema_version: "2.0"
+schema_version: "2.1"
 tenant:
   name: "Starter Yoga"
   default_timezone: America/New_York

@@ -28,7 +28,9 @@ variants:
       - drift: { kind: cross_domain_conflict, within_seconds: 60 }
       - outbox: { topic: notify, message: cross_domain_conflict }
       - assign: { person: priya, session: { template: desk_mid, location: park_slope, date: "2027-03-10", start: "11:00" },
-                  expect: 201 }       # 11:00 is after the class; allowed
+                  expect: RESOURCE_CONFLICT }   # 11:00–15:00 overlaps her own desk_open 06:15–12:45
+      - assign: { person: priya, session: { template: desk_mid, location: park_slope, date: "2027-03-10", start: "16:00" },
+                  expect: 201 }       # after the class and after her opening shift; desk_rest applies only closing → opening
   - name: unmapped teacher (order 3)
     steps:
       - mirror_event: { system: booking_vendor, type: class.updated,

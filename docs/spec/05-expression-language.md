@@ -57,7 +57,7 @@ session:  { id; template_key; template: Template; location_key: string; start: t
 template: Template
 location: { key: string; timezone: string }
 booking:  { id: string|null; state: string; start: timestamp; end: timestamp; duration_minutes: int;
-            channel: string; template: Template;
+            booked_via: string; template: Template;   // Booking.booked_via (web, desk, portal, agent, mirror, waitlist)
             payment: { method: 'units'|'price'|'none' };
             entitlement: { product_key: string; kind: string; tier: string|null } | null;
             place: { label: string; partition: string; attributes: map<string, dyn> } | null;
@@ -71,7 +71,9 @@ candidate: { resource: Resource; requirement_key: string;
 assignment: { id: string; requirement_key: string; resource: Resource|null; state: string; source: string }
 place:  { id: string; label: string; partition: string; attributes: map<string, dyn> }
 roster: { published_through: timestamp }
-event:  { name: string; at: timestamp; actor_type: string; reason: string|null; data: map<string, dyn> }
+event:  { name: string; at: timestamp; actor_type: string; reason: string|null;
+          domain: 'classes'|'bookings'|'members'|'shifts'|'none';   // §9.2; drives workflow scope (§9.3)
+          source: 'platform'|'mirror'; data: map<string, dyn> }
 me:     { roles: list<string>; resource_id: string|null; customer_id: string|null; location_keys: list<string> }
 row (entity = session): session fields + { assigned_resource_ids: list<string>; template: Template; custom: map }
 row (other entities): the entity's public fields + custom

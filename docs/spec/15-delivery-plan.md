@@ -8,43 +8,43 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 - **Infrastructure (IaC):** edge functions, per-tenant databases (preview and production), per-object stores, solver container, object storage.
 - **Control plane:** tenant lifecycle states (`provisioning` → `onboarding`).
 - **Identity:** token validation for both sign-in services; role mapping; token exchange for service and agent clients.
-- **Config:** schema 2.0 in Zod; `packages/expr` (CEL).
+- **Config:** schema 2.1 in Zod (2.0 documents accepted and upgraded); `packages/expr` (CEL).
 - **Manual config pipeline**, used without the agent: draft → validate L1–L4 → impact → approve → publish → rollback.
-- **Storage:** core tables; the guarded-batch helper with the scalar-assert lint; occupancy; hash-chained audit; outbox; flags.
+- **Storage:** core tables; the guarded-batch helper with the scalar-assert lint; occupancy; hash-chained audit; outbox; the saga runner and sweep (§3A.1 C6); flags.
 - **Ops and sync:** observability baseline (§13.9); `kairos-sync` skeleton with read-only BookingVendor and ShiftTool adapters through the gateway.
 
 **Acceptance**
-1. Both §4b fixtures pass the **real** validator (L1–L4, run in CI on every commit), compile to their golden hashes, and publish through the manual pipeline. CI also checks that `fixtures/configs/*.yaml` are identical to the YAML blocks in §4b.
+1. Both §4b fixtures pass the **real** validator (L1–L4, including the lane-aware `COVERAGE_UNCOVERABLE`, run in CI on every commit), compile to their golden hashes, and publish through the manual pipeline. `lotus_line.yaml` reports no `NOTICE_MISSING`. CI also checks that `fixtures/configs/*.yaml` are identical to the YAML blocks in §4b, and the L5 probe on `lotus_line.yaml` with a seeded staff set returns feasible.
 2. CEL conformance and sandbox-limit tests pass.
 3. Occupancy property tests pass over 10⁵ operations. Every assert-pattern test (§14.1) passes.
 4. Cross-tenant isolation tests pass, and preview cannot write to production.
 5. Lint rules are active: "never branch on kind" and the scalar-assert rule.
 
-## Phase 1: MVP. Mirror classes, bookings and members; own desk shifts (≈ 8 weeks)
+## Phase 1: MVP. Mirror classes, bookings and members; shadow then own desk shifts (≈ 8 weeks)
 
 **Scope**
-- **Onboarding:** run for the reference tenant as defined in §3.12.1: backfill, person mapping, preview seeding, go-live checklist.
+- **Onboarding:** run for the reference tenant as defined in §3A.3: backfill, person mapping, preview seeding, go-live checklist.
 - **Mirror ingestion and drift:** mirror classes (including teacher claims), bookings and members. Drift detection includes `unmapped_person`.
-- **Desk shifts, owned:** templates and coverage; availability, time off and swaps; the person-rule validator with `resource_day` guards; the desk roster solver; proposals; the roster saga; the staleness guard.
+- **Desk shifts, shadow then owned (D-47):** shift mapping (§18.5); 14 days of shifts shadow (validator verdicts, coverage and hours compared with ShiftTool, §18.7); then the cutover. Owned: templates and coverage; availability, time off and swaps; the person-rule validator with `resource_day` guards; the desk roster solver; proposals; the roster saga; the staleness guard. Lifecycle cards §3A.6, §3A.10, §3A.11, §3A.16.
 - **ShiftTool:** `outbound_push` so ShiftTool stays current.
 - **Hours:** hours records and the Gusto CSV export (§18.8); calendar sync.
-- **Staff lifecycle:** onboarding and offboarding (§3.12.4).
+- **Staff lifecycle:** onboarding and offboarding (§3A.6).
 - **Write-through façade** (§7.12): holds, bookings, cancellations and check-ins are forwarded to BookingVendor, with only the pre-checks run locally. Built-in policy behaviour stays off for mirrored domains (§7.13).
 - **Front ends:** the portal and desk app use `/assignments`, `/desk/now`, `/sessions?include=assignments`, `/tasks`, `/check-ins` (write-through), and the offline queue. The website timetable and mat map read the mirror, and bookings are written through.
-- **Workflows:** notify and create_task, with the timer driver.
+- **Workflows:** notify and create_task, with the timer driver; workflow `scope` and event domains (§9.3), so no member is messaged about mirrored records.
 
 **Acceptance**
 1. **A.5 passes on preview data seeded from production**, including the mode-guard variant (Kairos never cancels or promotes on mirrored classes). A teacher of a mirrored class can't be given an overlapping desk shift through the portal, the API or the solver. A conflicting mirror import raises `cross_domain_conflict` within 60 s. An unmapped teacher blocks desk assignments at that studio and time, and raises an alert.
 2. The desk roster for 3 studios × 2 weeks solves in ≤ 15 s. Infeasible coverage returns a minimal conflict set.
 3. Seeded drift is detected 100 % of the time. The mirror stays at most 2 min behind BookingVendor at p95.
-4. During a 60-day parallel run, Kairos's desk hours match ShiftTool's computed hours exactly. Only Kairos's Gusto CSV is uploaded for desk hours (§18.8). A dry-run upload of each Kairos file into the real Gusto payroll is accepted without errors and then cancelled before submitting.
+4. **Shifts shadow gate:** for 14 days, disagreement is below 0.2 % and 100 % triaged (§18.7). **After the cutover:** for the first 21 days of the 60-day push period, Kairos's desk hours match ShiftTool's computed hours exactly. Only Kairos's Gusto CSV is uploaded for desk hours (§18.8). A dry-run upload of each Kairos file into the real Gusto payroll is accepted without errors and then cancelled before submitting. (The full 60-day match is the ShiftTool retirement gate in Phase 3.)
 5. A staff deactivation takes effect within 60 s. Future shifts are vacated and tokens are refused.
 6. A rollback rehearsal for shifts (owner → mirror) completes in ≤ 30 min.
 
 ## Phase 2: Native booking engine in shadow; website books through Kairos (≈ 8 weeks)
 
 **Scope**
-- **Booking engine:** holds, SessionGate, places and partitions, entitlements (freeze, past-due), penalties, refunds, the waitlist with reservations and offers, approvals, the minimum-attendance and unstaffed timers.
+- **Booking engine:** holds, SessionGate, places and partitions, entitlements (freeze, past-due), penalties and refunds (including `refund.late`), the waitlist with reservations and offers, approvals, the minimum-attendance and unstaffed timers. All run as dry runs in shadow (§3A.2); lifecycle cards §3A.12–§3A.13, §3A.15.
 - **Shadow mode** for classes and bookings, with triage.
 - **Member lifecycle:** account, guest, merge, suspend, close, export and erase.
 - **Member assistant:** H1, H2 and confirmations.
@@ -60,14 +60,15 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 ## Phase 3: Own classes; teacher rostering; substitute finder (≈ 6 weeks)
 
 **Scope**
-- **Timetable in config:** series and materialisation, with the three edit scopes.
-- **Classes pushed to BookingVendor.**
+- **Timetable in config:** series and materialisation, with the three edit scopes and runtime session edits (§3A.9.2).
+- **Classes cutover:** adoption of mirrored future sessions into series (§3A.18, D-60); classes pushed to BookingVendor, including session cancels, which BookingVendor then applies to its bookings (D-44).
+- **Workflow `invoke_hook` action** and H3 hosted in `kairos-agent` (§10.4).
 - **Teacher rostering:** schedule solving.
 - **Substitutes:** sick call → offers → proposal → approval, plus the unstaffed policy.
-- **ShiftTool retired**, once it has run 60 days since Phase 1.
+- **ShiftTool retired**, once it has run 60 days since the shifts cutover with desk hours matching exactly.
 
 **Acceptance**
-1. The A.4 scenario suite passes. Vacated slots appear within 5 s. The first offers go out within 60 s. If no substitute is found, the built-in unstaffed check cancels the class, refunds members and notifies them.
+1. The A.4 scenario suite passes, including the Phase 3 variant (`bookings: shadow`). Vacated slots appear within 5 s. The first offers go out within 60 s. Two simultaneous accepts produce exactly one proposal. If no substitute is found, the built-in unstaffed check cancels the class in Kairos and pushes the cancel to BookingVendor within 60 s; BookingVendor's resulting booking cancellations are mirrored back; Kairos writes no refunds. A failed push raises the urgent task within 10 min.
 2. One week of 180 slots solves in ≤ 30 s. A re-solve after one change keeps at least 95 % of assignments stable.
 3. Classes cutover and rollback rehearsals each take ≤ 30 min. Push lag is under 60 s at p95.
 
@@ -79,9 +80,10 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 - Fees and refunds through the gateway.
 
 **Acceptance**
-1. Two weeks in owner mode with 0 invariant violations and 0 unreconciled debits.
-2. A rollback rehearsal completes in ≤ 30 min with no bookings lost.
-3. Replaying fee and refund jobs creates no duplicate charges.
+1. The A.3 suite and the A.4 owner-mode suite pass on production-like data: Kairos cancels bookings, refunds and notifies members itself. The bookings cutover follows §3A.18: imported bookings carry `origin: imported_at_cutover`, and BookingVendor waitlists are imported in order.
+2. Two weeks in owner mode with 0 invariant violations and 0 unreconciled debits.
+3. A rollback rehearsal completes in ≤ 30 min with no bookings lost.
+4. Replaying fee and refund jobs creates no duplicate charges.
 
 ## Phase 5: Own members; retire BookingVendor (≈ 8 weeks)
 
@@ -100,7 +102,7 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 
 **Scope**
 - Time clock in the portal.
-- Tenant offboarding (§3.12.1), tested end to end on a preview tenant.
+- Tenant offboarding (§3A.3), tested end to end on a preview tenant.
 - Onboarding of a second yoga tenant through the config agent only, starting from the starter config.
 
 **Acceptance**

@@ -18,7 +18,7 @@ Delivery is at least once. Effects happen exactly once, enforced by idempotency 
 
 ```ts
 type Trigger =
-  | { event: EventName; where?: Expr }
+  | { event: EventName | EventName[]; where?: Expr }      // list form: any of the events (schema 2.1)
   | { at: { relative_to: 'session.start' | 'session.end' | 'booking.created'; offset: SignedDuration;
             templates_tagged?: string[]; templates?: Key[]; for_each?: 'session' | 'booking' } }
   | { every: { rrule: string; at_local: LocalTime; location: Key } };
@@ -27,26 +27,51 @@ type Trigger =
 - **Relative triggers** are planned when the session or booking is created. If the session is retimed, they are re-planned in the same batch. With `for_each: booking`, one run fans out per booking that is `confirmed` at fire time.
 - **Calendar triggers** keep 14 days of `scheduled_action` rows ahead, topped up daily.
 
-| Event | Subjects | `event.reason` / `data` |
-|---|---|---|
-| `booking.held`, `booking.confirmed`, `booking.pending_approval`, `booking.rejected` | booking, session, customer | `booking.channel = waitlist` for promotions |
-| `booking.cancelled`, `booking.late_cancelled`, `booking.checked_in`, `booking.no_show`, `booking.penalty_assessed` | booking, session, customer | `data.waived`, `data.fee` |
-| `place.released` | place, session | `cancel`, `hold_expired`, `partition_release`, `capacity`, `reseat` |
-| `waitlist.joined`, `waitlist.offered`, `waitlist.skipped`, `waitlist.expired` | session, customer | skip reason code |
-| `session.created`, `session.cancelled`, `session.needs_staff`, `session.needs_resource`, `session.completed`, `session.retimed` | session | cancel reasons: `under_minimum`, `no_staff`, `closure`, `staff`, `config_migration`, `tenant_closed` |
-| `assignment.confirmed`, `assignment.vacated`, `assignment.changed` | assignment, session | `substitute`, `roster`, `manager`, `swap`; vacate: `sick`, `time_off`, `offboarding`, `skill_lost` |
-| `offer.sent`, `offer.accepted`, `offer.declined`, `offer.expired` | session; offer in `data` | — |
-| `roster.published` | roster | — |
-| `timeoff.submitted`, `timeoff.approved`, `swap.requested`, `swap.approved` | person in `data` | — |
-| `person.created`, `person.deactivated`, `skill.expiring` | person in `data` | — |
-| `entitlement.granted`, `entitlement.low_balance`, `entitlement.expiring`, `entitlement.past_due`, `entitlement.frozen` | customer | — |
-| `proposal.created`, `proposal.decided`, `proposal.expired` | proposal in `data` | — |
-| `tenant.closing` | — | `data.close_at` |
-| `config.published`, `config.expression_error`, `sync.drift_detected` | — | drift kinds: `cross_domain_conflict`, `unmapped_person`, `field_mismatch`, `missing_local`, `missing_remote`, `push_failed` |
-| `custom.<name>` | as emitted | e.g. `custom.substitute_exhausted` from H3 |
+Every event carries a **domain** (`event.domain`, used by workflow scope in §9.3) and a **source** (`platform` for Kairos decisions, `mirror` for records ingested from an outside system). **R** marks a *required notice*: validation warns `NOTICE_MISSING` when the condition in brackets holds and no enabled workflow with a `notify` action listens for the event (§6.3).
+
+| Event | Domain | Subjects | `event.reason` / `data` | R |
+|---|---|---|---|---|
+| `booking.held`, `booking.pending_approval` | bookings | booking, session, customer | — | |
+| `booking.confirmed` | bookings | booking, session, customer | `approved` when it was pending; `booking.booked_via = waitlist` for promotions; `data.moved_from` | R (waitlist enabled) |
+| `booking.rejected` | bookings | booking, session, customer | `declined`, `timeout`, `session_started` | R (any policy has `approval`) |
+| `booking.cancelled` | bookings | booking, session, customer | `member`, `staff`, `studio_cancel`, `payment_failed`, `config_migration`, `moved` | R for `payment_failed` (price payments allowed) |
+| `booking.late_cancelled`, `booking.checked_in`, `booking.no_show`, `booking.attendance_corrected` | bookings | booking, session, customer | — | |
+| `booking.penalty_assessed` | bookings | booking, session, customer | `data.waived`, `data.fee`, `data.refund` | |
+| `booking.reseated` | bookings | booking, session, customer | `block`, `room_changed`, `layout` | R (any layout) |
+| `place.released` | bookings | place, session | `cancel`, `hold_expired`, `partition_release`, `capacity`, `reseat`, `block`, `session_changed` | |
+| `waitlist.joined`, `waitlist.expired` | bookings | session, customer | `end_reason` | |
+| `waitlist.offered` | bookings | session, customer | — | R (any `offer_all` mode) |
+| `waitlist.skipped` | bookings | session, customer | skip reason code | R (waitlist enabled) |
+| `session.created`, `session.completed`, `session.needs_staff` | classes or shifts | session | — | |
+| `session.cancelled` | classes or shifts | session | `under_minimum`, `no_staff`, `no_room`, `closure`, `staff`, `config_migration`, `tenant_closed` | R (customer templates) |
+| `session.retimed`, `session.room_changed` | classes | session | `data.from` | R (customer templates) |
+| `session.capacity_changed`, `session.under_minimum`, `session.unstaffed` | classes | session | `data.from` | |
+| `session.needs_resource` | classes | session | `block`, `retired` | |
+| `assignment.confirmed` | classes or shifts | assignment, session | `substitute`, `roster`, `manager`, `swap`; `data.first` | |
+| `assignment.vacated` | classes or shifts | assignment, session | `sick`, `time_off`, `offboarding`, `skill_lost`, `manager`, `session_changed` | R (any `roster` requirement) |
+| `assignment.released` | classes or shifts | assignment, session | `session_cancelled` | |
+| `assignment.changed`, `assignment.flagged` | classes or shifts | assignment, session | `availability`, `location` | |
+| `offer.sent` | classes (substitute) / bookings (place) | session; offer in `data` (`data.kind`) | — | R for `kind: substitute` (any `roster` requirement) |
+| `offer.accepted`, `offer.declined`, `offer.expired`, `offer.withdrawn` | as `offer.sent` | session; offer in `data` | withdrawn: `filled`, `session_cancelled`, `person_inactive`, `rollback` | |
+| `roster.published` | shifts or classes | roster; affected people in `data` | — | |
+| `timeoff.submitted` | shifts | person in `data` | `data.immediate` | R (any `roster` requirement) |
+| `timeoff.approved`, `timeoff.rejected`, `swap.requested`, `swap.approved`, `swap.rejected` | shifts | person in `data` | — | |
+| `person.created`, `person.deactivated`, `skill.expiring` | none | person in `data` | — | |
+| `customer.merged`, `customer.suspended`, `customer.closed`, `customer.export_ready` | members | customer | `data.link` for exports | |
+| `entitlement.granted`, `entitlement.renewed`, `entitlement.low_balance`, `entitlement.expiring`, `entitlement.past_due`, `entitlement.frozen` | members | customer | — | |
+| `proposal.created`, `proposal.decided`, `proposal.expired` | domain of the proposal's ops | proposal in `data` (`data.state`, `data.kind`) | — | R for `proposal.created` (any `roster` requirement) |
+| `proposal.urgent` | classes | proposal in `data`, session | deferred unstaffed check (§3A.9.5) | R (any `roster` requirement) |
+| `tenant.closing` | none | — | `data.close_at` | R (always) |
+| `domain.mode_changed` | none | — | `data.domain`, `data.from`, `data.to` | |
+| `config.published`, `config.expression_error` | none | — | — | |
+| `sync.drift_detected` | none | — | drift kinds: `cross_domain_conflict`, `unmapped_person`, `field_mismatch`, `missing_local`, `missing_remote`, `push_failed` | R (any domain not owner) |
+| `custom.<name>` | none | as emitted | e.g. `custom.substitute_exhausted` from H3 | |
+
+The domain of a `classes or shifts` event is the domain of the session's template: shifts for templates with `participants.who = none`, classes otherwise. This reads `participants`, not `kind` (principle 4).
 
 ## 9.3 Conditions
 
+- **Scope (D-51).** With `scope: owned` (the default), a run is created only when `event.domain` is `none` or its domain mode is `owner`. In addition, member recipients (`customer`, `session_customers`, `waitlist`) resolve to nobody unless `bookings` is `owner`, and `all_members` resolves to nobody unless `members` is `owner`. Each suppressed recipient is logged as `recipient_not_owned`. So, while BookingVendor holds the bookings, it alone messages members, and Kairos never duplicates its notices. `scope: all` lifts both restrictions. It is meant for staff-facing workflows on mirrored data, and validation warns `SCOPE_ALL_MEMBER_RECIPIENT` (§6.3) if a `scope: all` workflow notifies members.
 - `trigger.where` filters events before a run is created.
 - `condition` is checked when the run is created, and again before each delayed action when `recheck_at_fire` is true (the default).
 - `action.when` gates a single action.
@@ -61,7 +86,7 @@ type ActionDef = ActionBase & (
   | { type: 'notify'; channel: 'email' | 'sms' | 'push' | 'staff_chat'; to: Recipient; message: string;
       vars?: Record<string, Expr> }
   | { type: 'create_task'; list: 'desk_checklist' | 'manager_inbox'; title: string; due?: Offset; location?: Key }
-  | { type: 'cancel_session'; reason: string }                 // refunds always per policy.refund.studio_cancel
+  | { type: 'cancel_session'; reason: string }                 // runs the studio cancel of §3A.9.4 (refunds per refund.studio_cancel when bookings are owned)
   | { type: 'adjust_units'; unit: Key; amount: number; reason: string }   // |amount| ≤ 2 per run
   | { type: 'set_field'; entity: 'booking' | 'customer' | 'session'; field: Key; value: Expr }
   | { type: 'invoke_hook'; hook: 'substitute_finder' | 'explain_block' | 'staff_draft'; input: Record<string, Expr> }
@@ -71,13 +96,15 @@ type ActionDef = ActionBase & (
 type Recipient =
   | { customer: true } | { session_customers: true } | { waitlist: true }
   | { assignment: Key } | { assignment_people: true }
-  | { roles: PlatformRole[]; location?: 'session' }
+  | { event_people: true }               // the staff the event is about: data.person, the assignment's resource,
+                                         //   a roster's affected people, a substitute offer's recipient
+  | { roles: PlatformRole[]; location?: 'session' }   // 'session': role holders at the session's studio; ignored when the event has no session
   | { all_members: true };               // only for trigger tenant.closing; batched 500 per outbox row
 ```
 
 | Action | Effect | External call | Bounds |
 |---|---|---|---|
-| `notify` | Resolves recipient references; writes an outbox row | Notification service `POST /messages`, with idempotency key | ≤ 500 recipients per row; templates live in the notification service |
+| `notify` | Resolves recipient references (subject to scope, §9.3; for `session.cancelled`, `session_customers` means the customers whose bookings were active just before the cancel); writes an outbox row | Notification service `POST /messages`, with idempotency key | ≤ 500 recipients per row; templates live in the notification service |
 | `create_task` | Inserts a task | — | — |
 | `cancel_session` | Runs the engine's studio cancel (§7.6) | Refunds via gateway (outbox) | Only before the session starts |
 | `adjust_units` | Ledger `adjust` row | — | ≤ 2 units; ≤ 1 per subject per workflow per day |
@@ -127,6 +154,8 @@ outbox idempotency key = action_key
 - **Dana has no credits.** Her entry is `skipped` (`INSUFFICIENT_UNITS`) and `skipped_notice` emails her. Eli is promoted onto Mat 3 (`best`, since he has no preferences).
 - **Nobody is eligible.** `reserved_for` is cleared and Mat 3 is free for anyone. At 18:30, `place_refilled` is false unless someone booked it meanwhile; if so, Cara is charged $10 via outbox → gateway → processor (key `fee:bkg_cara:late`), plus a strike if the policy sets one.
 - **Cara paid with a pack.** If waived, a `release +1` row returns her credit. If not waived, a `forfeit` row is written.
+- **Cara paid $30 as a drop-in.** No units and no fee (`fee_if` is false for a price payment). The reference policy has `refund.late: none`, so she gets no refund even though Mat 3 is refilled; the assessment emits `booking.penalty_assessed{waived: true, refund: none}`. With `refund.late: as_timely_if_refilled`, a refund job `refund:bkg_cara:late` for $30 would be created at 18:30 (D-48).
+- **Cancellation before the front row is released** (Mon 12:00, Mat 3 still in `front_row_unlimited`). Dana's tier is `member`, so she can't use the place, but Eli is `unlimited` and eligible. The place is reserved (D-59) and Eli is promoted onto Mat 3, while Dana stays `waiting`. If no waiting member were unlimited, the place would not be reserved, and any unlimited member could book it.
 - **Cancellation at 17:00** (mode **offer_all**). Dana and Eli each get a place offer that expires at 17:15. Mat 3 stays reserved for offered members. The first to hold and confirm wins (the hold lasts until at most 17:20, §7.5.2). If both offers expire, both go back to `waiting` and `reserved_for` is cleared.
 - **Dana late-cancels at 18:10.** The mode is offer_all until 18:15. If Mat 3 is not refilled, both Cara's and Dana's assessments at 18:30 see `place_refilled = false`, and both are charged under their own terms.
 

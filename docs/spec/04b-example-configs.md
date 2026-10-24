@@ -3,7 +3,7 @@
 Two complete documents validate against §4:
 
 - **4b.1:** the reference tenant (three studios with mat maps, a heated room, desk shifts, and instructor rostering).
-- **4b.2:** the **yoga starter config**, a single-studio variant with pooled rooms and no mat map. Onboarding uses it as its starting point (§3.12.1).
+- **4b.2:** the **yoga starter config**, a single-studio variant with pooled rooms and no mat map. Onboarding uses it as its starting point (§3A.3).
 
 Both are fixtures (`fixtures/configs/lotus_line.yaml`, `fixtures/configs/yoga_starter.yaml`, §14.2), and both are reproduced here in full.
 
@@ -12,7 +12,7 @@ Neither uses special-case code: the engines read only requirements, capacity, sc
 ## 4b.1 Reference tenant: "Lotus & Line Yoga" (three studios)
 
 ```yaml
-schema_version: "2.0"
+schema_version: "2.1"
 tenant:
   name: "Lotus & Line Yoga"
   default_timezone: America/New_York
@@ -86,7 +86,7 @@ resources:
       attributes: { capacity: 28 } }
   - { key: ps_desk, type: front_desk, name: "Park Slope desk", location: park_slope, concurrency: 2 }
   - { key: wb_desk, type: front_desk, name: "Williamsburg desk", location: williamsburg, concurrency: 2 }
-  - { key: db_desk, type: front_desk, name: "Dumbo desk", location: dumbo, concurrency: 1 }
+  - { key: db_desk, type: front_desk, name: "Dumbo desk", location: dumbo, concurrency: 2 }   # 2 lanes for shift handovers; placeholder (Q-17)
 layouts:
   - key: mats_30
     spot_type: mat
@@ -269,7 +269,7 @@ policies:
         strikes: 1
         assess_at: session_end
         grace: 10m
-    refund: { timely: full, studio_cancel: full }
+    refund: { timely: full, late: none, studio_cancel: full }
     limits:
       - { key: daily, window: day, max: 2, message: "You can book up to 2 classes per day." }
       - { key: upcoming_member, window: upcoming, max: 8, applies_if: "customer.tier != 'unlimited'",
@@ -374,7 +374,8 @@ constraints:
   - { key: desk_week, description: "Desk staff: at most 40 hours a week, desk and teaching combined", level: hard,
       applies_to: { roles: [desk_staff] }, rule: { type: max_hours, window: week, hours: 40 } }
   - { key: desk_rest, description: "At least 10 hours between a closing and the next opening shift", level: hard,
-      applies_to: { roles: [desk_staff] }, rule: { type: min_rest, duration: 10h } }
+      applies_to: { roles: [desk_staff] },
+      rule: { type: min_rest, duration: 10h, from: { template_tags: [closing] }, to: { template_tags: [opening] } } }
   - { key: teach_day, description: "Teachers teach at most 4 classes a day", level: hard,
       applies_to: { roles: [teacher] }, rule: { type: max_assignments, window: day, count: 4 } }
   - { key: teach_rest, description: "15 minutes between a teacher's claims", level: hard,
@@ -424,7 +425,7 @@ workflows:
     actions: [{ type: notify, channel: push, to: { customer: true }, message: class_reminder }]
   - key: promoted_notice
     name: "Waitlist promotion"
-    trigger: { event: booking.confirmed, where: "booking.channel == 'waitlist'" }
+    trigger: { event: booking.confirmed, where: "booking.booked_via == 'waitlist'" }
     recheck_at_fire: false
     actions: [{ type: notify, channel: sms, to: { customer: true }, message: waitlist_promoted }]
   - key: offer_notice
@@ -444,17 +445,151 @@ workflows:
     recheck_at_fire: true
     actions: [{ type: create_task, list: desk_checklist, title: "Open studio: heat Studio 2, set mats, float till" }]
   - key: cross_domain_alert
-    name: "Outside system double-booked a person"
-    trigger: { event: sync.drift_detected, where: "event.reason == 'cross_domain_conflict' || event.reason == 'unmapped_person'" }
+    name: "Outside-system problem: double-booking, unmapped teacher, failed push"
+    trigger: { event: sync.drift_detected, where: "event.reason in ['cross_domain_conflict', 'unmapped_person', 'push_failed']" }
     recheck_at_fire: false
     actions:
-      - { type: notify, channel: staff_chat, to: { roles: [manager] }, message: cross_domain_conflict }
-      - { type: create_task, list: manager_inbox, title: "Resolve class/desk double-booking or unmapped teacher" }
+      - { type: notify, channel: staff_chat, to: { roles: [manager] }, message: cross_domain_conflict, vars: { kind: "event.reason" } }
+      - { type: create_task, list: manager_inbox, title: "Resolve outside-system problem (double-booking, unmapped teacher or failed push)" }
   - key: tenant_closing
     name: "Tenant closing notice"
     trigger: { event: tenant.closing }
     recheck_at_fire: false
     actions: [{ type: notify, channel: email, to: { all_members: true }, message: studio_closing }]
+  - key: session_changed_notice
+    name: "Class time or room changed"
+    trigger: { event: [session.retimed, session.room_changed] }
+    recheck_at_fire: false
+    actions:
+      - { type: notify, channel: sms, to: { session_customers: true }, message: class_changed, vars: { from: "event.data['from']" } }
+      - { type: notify, channel: push, to: { assignment_people: true }, message: class_changed }
+  - key: reseat_notice
+    name: "Mat changed"
+    trigger: { event: booking.reseated }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: mat_changed }]
+  - key: payment_failed_notice
+    name: "Payment failed, booking cancelled"
+    trigger: { event: booking.cancelled, where: "event.reason == 'payment_failed'" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: payment_failed }]
+  - key: approval_decided
+    name: "Booking approval decided"
+    trigger: { event: [booking.confirmed, booking.rejected], where: "event.name == 'booking.rejected' || event.reason == 'approved'" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: approval_decided }]
+  - key: penalty_notice
+    name: "Late-cancel or no-show penalty"
+    trigger: { event: booking.penalty_assessed, where: "!event.data['waived']" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: penalty_applied }]
+  - key: entitlement_notice
+    name: "Membership or pack started"
+    trigger: { event: entitlement.granted }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: entitlement_started }]
+  - key: past_due_notice
+    name: "Payment problem on membership"
+    trigger: { event: entitlement.past_due }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: membership_past_due }]
+  - key: expiring_notice
+    name: "Credits expiring"
+    trigger: { event: entitlement.expiring }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: credits_expiring }]
+  - key: member_suspended
+    name: "Account suspended"
+    trigger: { event: customer.suspended }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: account_suspended }]
+  - key: account_closed
+    name: "Account closed"
+    trigger: { event: customer.closed }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: account_closed }]
+  - key: export_ready
+    name: "Data export ready"
+    trigger: { event: customer.export_ready }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { customer: true }, message: export_ready, vars: { link: "event.data['link']" } }]
+  - key: substitute_offer_notice
+    name: "Substitute request to a teacher"
+    trigger: { event: offer.sent, where: "event.data['kind'] == 'substitute'" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: sms, to: { event_people: true }, message: substitute_request }]
+  - key: substitute_filled_notice
+    name: "Substitute request filled"
+    trigger: { event: offer.withdrawn, where: "event.data['kind'] == 'substitute' && event.reason == 'filled'" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: sms, to: { event_people: true }, message: substitute_filled }]
+  - key: approval_needed
+    name: "Proposal waiting for approval"
+    trigger: { event: proposal.created }
+    recheck_at_fire: true
+    condition: "event.data['state'] == 'pending'"
+    actions: [{ type: notify, channel: staff_chat, to: { roles: [manager], location: session }, message: proposal_waiting }]
+  - key: approval_urgent
+    name: "Urgent: approve before the class is cancelled"
+    trigger: { event: proposal.urgent }
+    recheck_at_fire: false
+    actions:
+      - { type: notify, channel: sms, to: { roles: [manager], location: session }, message: proposal_urgent }
+      - { type: notify, channel: staff_chat, to: { roles: [manager], location: session }, message: proposal_urgent }
+  - key: room_needed
+    name: "Class needs a room"
+    trigger: { event: session.needs_resource }
+    recheck_at_fire: false
+    actions:
+      - { type: create_task, list: manager_inbox, title: "Class needs a room", due: { before_start: 2h } }
+      - { type: notify, channel: staff_chat, to: { roles: [manager], location: session }, message: room_needed }
+  - key: staff_session_cancelled
+    name: "Your class or shift was cancelled"
+    trigger: { event: assignment.released, where: "event.reason == 'session_cancelled'" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: push, to: { event_people: true }, message: session_cancelled_staff }]
+  - key: staff_welcome
+    name: "First assignment"
+    trigger: { event: assignment.confirmed, where: "event.data['first'] == true" }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: email, to: { event_people: true }, message: staff_welcome }]
+  - key: skill_expiring
+    name: "Certification expiring"
+    trigger: { event: skill.expiring }
+    recheck_at_fire: false
+    actions:
+      - { type: notify, channel: email, to: { event_people: true }, message: certification_expiring }
+      - { type: create_task, list: manager_inbox, title: "Certification expiring" }
+  - key: assignment_flagged
+    name: "Assignment no longer fits availability"
+    trigger: { event: assignment.flagged }
+    recheck_at_fire: false
+    actions: [{ type: create_task, list: manager_inbox, title: "Check flagged assignment" }]
+  - key: roster_published
+    name: "Roster published"
+    trigger: { event: roster.published }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: push, to: { event_people: true }, message: roster_published }]
+  - key: timeoff_notice
+    name: "Time off or sick call submitted"
+    trigger: { event: timeoff.submitted }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: staff_chat, to: { roles: [manager] }, message: timeoff_submitted }]
+  - key: timeoff_decided
+    name: "Time off decided"
+    trigger: { event: [timeoff.approved, timeoff.rejected] }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: push, to: { event_people: true }, message: timeoff_decided }]
+  - key: swap_notice
+    name: "Swap updates"
+    trigger: { event: [swap.requested, swap.approved, swap.rejected] }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: push, to: { event_people: true }, message: swap_update }]
+  - key: mode_changed_notice
+    name: "Domain mode changed"
+    trigger: { event: domain.mode_changed }
+    recheck_at_fire: false
+    actions: [{ type: notify, channel: staff_chat, to: { roles: [owner, manager] }, message: domain_mode_changed }]
 custom_fields:
   - { key: liability_waiver, label: "Liability waiver", entity: customer, type: consent, required_if: "true",
       visible_to: [desk, manager, member], editable_by: [member, desk], pii: false }
@@ -510,13 +645,17 @@ access:
 - The `walk_in` partition is the last two mats of each layout, tagged `walk_in` (Mats 29–30 in Studio 1, 23–24 in Studio 2, 35–36 in Williamsburg). They are desk-only until 2 h before class, then go to `general`.
 - Desk shift start times (`starts`) and the directory group names are **placeholders** until the tenant confirms them (Q-11, Q-12). Each start fits inside its studio's hours on those days, and the three templates together cover every coverage pattern.
 - In Studio 1, row 1 is Mats 1–6. Mat 12 is in row 2 and is a wall mat. It is **not** front row.
+- **Desk lanes.** Opening and closing shifts overlap at handover (Dumbo weekdays 12:00–13:30, Saturdays 12:00–14:30 with the mid shift). Every desk therefore has 2 lanes. The Dumbo value is a placeholder until the tenant confirms it (Q-17, D-45). With 1 lane, `COVERAGE_UNCOVERABLE` fails validation (§6.3).
+- **`desk_rest`** applies only from a `closing` shift to the next `opening` shift (`min_rest.from` / `to`, §4.11, D-46). An opening shift followed by an evening class or a mid shift is not restricted by it; `teach_rest` (15 min) and the no-overlap rule still apply.
+- **Refunds.** `refund.late: none`: a drop-in who cancels late gets no money back, even if the mat is refilled (D-48, Q-18). Units and the membership fee still follow `waive_if`.
+- **Workflows.** Every *required notice* event in §9.2 has a workflow, so validation reports no `NOTICE_MISSING`. All workflows use the default `scope: owned` (§9.3). So, while bookings are mirrored, member-facing workflows (`class_reminder`, `no_sub_notice`, …) send nothing, and BookingVendor keeps messaging its members (D-51). Staff-facing workflows on owned shifts run from Phase 1.
 
 ## 4b.2 Yoga starter config (one studio, pooled, packs only)
 
-This is the onboarding starting point (§3.12.1). It also shows the same schema with no mat map, no desk shifts and no rostering.
+This is the onboarding starting point (§3A.3). It also shows the same schema with no mat map, no desk shifts and no rostering.
 
 ```yaml
-schema_version: "2.0"
+schema_version: "2.1"
 tenant:
   name: "Starter Yoga"
   default_timezone: America/New_York
@@ -619,5 +758,7 @@ access:
     - { issuer: staff_auth, claim: groups, equals: owners, role: teacher }
   default_member_role: member
 ```
+
+The starter has only one workflow, so validation reports `NOTICE_MISSING` warnings for the other required-notice events (§6.3). They must be acknowledged at the first publish, or added by the agent.
 
 The `@staff:owner` reference is resolved during onboarding, when the owner's person record exists. Until then, validation reports `STAFF_REF_MISSING` (§6.3). The onboarding wizard asks for the owner's staff key before the first publish.
