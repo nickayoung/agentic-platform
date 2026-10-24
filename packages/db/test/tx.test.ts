@@ -44,6 +44,7 @@ describe('Db.tx (§12.2, §19.2)', () => {
       expect(() => db.tx(asyncBody)).toThrow(TxDefect);
 
       expect(() =>
+        // eslint-disable-next-line kairos/no-async-in-tx -- deliberately violates the rule to test the runtime guard
         // @ts-expect-error same for an async arrow that writes before awaiting
         db.tx(async (tx) => {
           tx.run(`INSERT INTO limit_counter (key, count, max, window_end) VALUES ('x', 1, 5, 0)`);
