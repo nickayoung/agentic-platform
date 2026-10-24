@@ -74,13 +74,13 @@ describe('TenantCore', () => {
     });
     expect(seen.map((s) => s.url)).toEqual(['https://gateway.test/v1/payments/refund', 'https://notify.test/v1/messages']);
     expect(seen[0]!.key).toBe('refund:bkg_1:timely');
-    await runInDurableObject(stub, async (obj) => {
+    await runInDurableObject(stub, async (obj, state) => {
       const rows = obj.db.tx((tx) => tx.all<{ id: string; state: string; attempts: number; next_attempt_at: number }>(
         'SELECT id, state, attempts, next_attempt_at FROM outbox ORDER BY id'));
       expect(rows.map((r) => [r.id, r.state, r.attempts])).toEqual([['o1', 'pending', 1], ['o2', 'pending', 1]]);
       expect(rows[0]!.next_attempt_at - Date.now()).toBeGreaterThan(RETRY_DELAYS_MS[0] - 5_000);
       // the next alarm is the retry, not later
-      const alarm = await obj.ctx.storage.getAlarm();
+      const alarm = await state.storage.getAlarm();
       expect(alarm).not.toBeNull();
       expect(alarm!).toBeLessThanOrEqual(rows[0]!.next_attempt_at);
       // make the retry due now and succeed
