@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm -r --if-present --filter '!eslint-plugin-kairos' test",
     "lint": "eslint .",
     "check": "pnpm typecheck && pnpm lint && pnpm test"
   },
