@@ -47,6 +47,8 @@ importers:
 
   packages/errors: {}
 
+  packages/expr: {}
+
 packages:
 
   '@cacheable/memory@2.2.0':
