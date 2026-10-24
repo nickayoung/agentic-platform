@@ -4,7 +4,7 @@ import { applyMigrations, coreMigrations, createDb, type Db } from '../src/index
 
 export class TestDb extends DurableObject {
   readonly db: Db;
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.db = createDb(ctx.storage, { place_claim: 'PLACE_TAKEN', entitlement_balance: 'INSUFFICIENT_UNITS' });
     ctx.blockConcurrencyWhile(async () => {
