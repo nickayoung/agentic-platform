@@ -146,6 +146,9 @@ importers:
 
   packages/config-schema:
     dependencies:
+      '@kairos/expr':
+        specifier: workspace:*
+        version: link:../expr
       canonicalize:
         specifier: 5.1.0
         version: 5.1.0
