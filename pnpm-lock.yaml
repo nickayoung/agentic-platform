@@ -185,6 +185,8 @@ importers:
 
   packages/errors: {}
 
+  packages/expr: {}
+
   packages/scheduler:
     dependencies:
       '@kairos/db':
