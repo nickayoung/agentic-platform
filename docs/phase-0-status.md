@@ -33,7 +33,7 @@ Tracks §15 Phase 0 against the code. Updated with each Phase 0 change.
 | Observability baseline (§13.9) | **Partly**: structured logs, Workers observability on. Analytics Engine metrics and the ops alert cron not started |
 | `kairos-sync` skeleton with read-only adapters | **Done** against a normalised gateway contract; real BookingVendor and ShiftTool API details are still open (Q-11) |
 | Kairos console (TanStack Start) Phase 0 screens | **Not started** |
-| CI on Cloudflare (`apps/ci`, §19.18) | **Built and tested locally**: Worker tests pass, and the runner image ran the full suite against the Artifacts repo. Not deployed yet |
+| CI on Cloudflare (`apps/ci`, §19.18) | **Deployed** at `https://kairos-ci.lucky-shadow-edb4.workers.dev`. First run (manual, `630f910`) passed every step in about 2 minutes |
 | Phase 0 spikes (§19.17) | **1 done** (CEL interpreter). 2–6 need a Cloudflare account: throughput, solver cold start, console on Workers, PITR drill, storage growth |
 
 ## Findings while building

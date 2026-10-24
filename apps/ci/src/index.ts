@@ -208,10 +208,14 @@ export default {
   },
 
   /** Artifacts has no push events, so watched branches are polled; a run starts once per new head commit. */
-  async scheduled(_c: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(Promise.allSettled(branches(env).map(async (b) => {
+  async scheduled(_c: ScheduledController, env: Env): Promise<void> {
+    const results = await Promise.allSettled(branches(env).map(async (b) => {
       const r = await startRun(env, b, 'poll');
       if (r?.created) console.log(JSON.stringify({ msg: 'ci run started', branch: b, sha: r.sha, id: r.id }));
-    })));
+      return r;
+    }));
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') console.error(JSON.stringify({ msg: 'ci poll failed', branch: branches(env)[i], error: String(r.reason) }));
+    });
   },
 } satisfies ExportedHandler<Env>;

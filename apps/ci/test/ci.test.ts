@@ -49,10 +49,29 @@ describe('kairos-ci', () => {
 
   it('the cron polls every watched branch', async () => {
     const { e, created } = fakeEnv({ main: SHA, 'feature/x': 'b'.repeat(40) });
-    const waits: Promise<unknown>[] = [];
-    await worker.scheduled({} as ScheduledController, e, { waitUntil: (p: Promise<unknown>) => waits.push(p) } as unknown as ExecutionContext);
-    await Promise.all(waits);
+    await worker.scheduled({} as ScheduledController, e);
     expect(created.map((c) => c.id).sort()).toEqual([`poll-${'a'.repeat(40)}`, `poll-${'b'.repeat(40)}`]);
+  });
+
+  it('a failing branch poll is logged, and the other branches still start', async () => {
+    const { e, created } = fakeEnv({ 'feature/x': 'b'.repeat(40) });
+    (e.ARTIFACTS as unknown as { get: () => Promise<unknown> }).get = (() => {
+      let n = 0;
+      return async () => {
+        if (n++ === 0) throw new Error('artifacts unavailable');
+        return { [Symbol.dispose]() {}, log: async () => [{ hash: 'b'.repeat(40), message: 'm' }] };
+      };
+    })();
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (m: string) => { errors.push(m); };
+    try {
+      await worker.scheduled({} as ScheduledController, e);
+    } finally {
+      console.error = orig;
+    }
+    expect(errors.some((m) => m.includes('ci poll failed') && m.includes('artifacts unavailable'))).toBe(true);
+    expect(created).toHaveLength(1);
   });
 
   it('POST /runs needs the trigger token', async () => {
