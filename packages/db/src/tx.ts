@@ -19,7 +19,10 @@ export interface Tx {
 
 type NotThenable<T> = T extends PromiseLike<unknown> ? never : T;
 
-/** Maps a constraint name (table or index, as SQLite reports it) to a reason code. */
+/**
+ * Maps a constraint to a reason code. Keys are a table name (for UNIQUE / PRIMARY KEY / NOT NULL failures, which
+ * SQLite reports as `table.column`) or a named CHECK constraint (reported by name; unnamed CHECKs can't be mapped).
+ */
 export type ConstraintMap = Record<string, ReasonCode>;
 
 export interface Db {

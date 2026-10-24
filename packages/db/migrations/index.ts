@@ -1,3 +1,4 @@
+/// <reference path="../src/sql-modules.d.ts" />
 import type { Migration } from '../src/migrate';
 import core0001 from './0001_core.sql';
 

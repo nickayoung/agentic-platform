@@ -68,7 +68,7 @@ CREATE TABLE session (
   source TEXT NOT NULL CHECK (source IN ('platform','mirror')),
   version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   CHECK (start_at < end_at AND start_at % 300000 = 0 AND end_at % 300000 = 0),   -- I-10
-  CHECK (booked_count >= 0 AND waitlist_count >= 0));
+  CONSTRAINT session_counts_nonneg CHECK (booked_count >= 0 AND waitlist_count >= 0));
 CREATE INDEX session_location_start ON session(location_key, start_at);
 CREATE INDEX session_status_start ON session(status, start_at);
 
@@ -152,10 +152,10 @@ CREATE TABLE customer_strike (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, bo
 CREATE INDEX customer_strike_window ON customer_strike(customer_id, at) WHERE removed_at IS NULL;
 
 CREATE TABLE limit_counter (key TEXT PRIMARY KEY, count INTEGER NOT NULL, max INTEGER NOT NULL, window_end INTEGER NOT NULL,
-  CHECK (count >= 0 AND count <= max)) WITHOUT ROWID;
+  CONSTRAINT limit_counter_within_max CHECK (count >= 0 AND count <= max)) WITHOUT ROWID;
 CREATE TABLE entitlement_balance (entitlement_id TEXT NOT NULL, unit TEXT NOT NULL, balance INTEGER, period_start INTEGER,
   version INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (entitlement_id, unit),
-  CHECK (balance IS NULL OR balance >= 0)) WITHOUT ROWID;
+  CONSTRAINT entitlement_balance_nonneg CHECK (balance IS NULL OR balance >= 0)) WITHOUT ROWID;
 CREATE TABLE ledger (id TEXT PRIMARY KEY, entitlement_id TEXT NOT NULL, unit TEXT NOT NULL, delta INTEGER NOT NULL,
   kind TEXT NOT NULL, booking_id TEXT, reason TEXT, actor TEXT NOT NULL, at INTEGER NOT NULL,
   idempotency_key TEXT NOT NULL UNIQUE);
