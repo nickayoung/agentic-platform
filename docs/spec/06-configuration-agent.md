@@ -92,7 +92,7 @@ Layers: **L1** schema, **L2** references, **L3** expressions, **L4** semantic ru
 | L4 | `PAYROLL_JOB_COLUMN_MISSING` | E | `split_by_kind` is set without a job column and `job_names` |
 | L4 | `PAYROLL_OT_BELOW_ROSTER_CAP` | W | `overtime.weekly_hours` is below the highest `max_hours/week` rule, so rosters can legally produce overtime |
 | L4 | `NOTICE_MISSING` | W | A *required notice* event (§9.2), applicable to this config, has no enabled workflow with a `notify` action. Replaces v2.1's `WAITLIST_SILENT`; `waitlist.offered` and `waitlist.skipped` are in the list |
-| L4 | `SCOPE_ALL_MEMBER_RECIPIENT` | W | A workflow with `scope: all` has a member recipient, so it may message members about records an outside system owns (§9.3) |
+| L4 | `SCOPE_ALL_MEMBER_RECIPIENT` | W | With `member_messaging: record_holder`, a workflow with `scope: all` has a member recipient, so it may message members about records an outside system owns (§9.3) |
 | L4 | `MIN_REST_SCOPE_UNKNOWN_TAG` | E | A `min_rest.from`/`to` tag is not a tag of any template |
 | L4 | `KIND_MISMATCH` | W | `kind: shift` with customers, or `kind: class` with `participants: none` |
 | L4 | `DST_SHIFTED_OCCURRENCE` | I | An occurrence falls on a non-existent local time (§7.10) |

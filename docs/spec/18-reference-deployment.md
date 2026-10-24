@@ -6,13 +6,14 @@
 |---|---|
 | Studios | Park Slope (Studio 1: 30 mats; Studio 2, heated: 24 mats), Williamsburg (36 mats), Dumbo (28 places, no mat map). All in `America/New_York` |
 | People | About 40 teachers and about 25 desk staff. Some do both |
-| Outside systems | **BookingVendor** is the record for classes, bookings, members, memberships and payments. **ShiftTool** holds desk shifts. **Gusto** pays staff. Kairos hands it hours as a CSV file that a manager uploads (§18.8) |
+| Outside systems | **BookingVendor** is the record for classes, bookings, members, memberships and payments today. **ShiftTool** holds desk shifts. **Gusto** pays staff; Kairos hands it hours as a CSV file that a manager uploads (§18.8). **Stripe** is the card processor Kairos uses once it owns payments (§18.10) |
+| Target | **Kairos manages everything** except payroll: classes, bookings, waitlists, members, memberships, packs, checkout, refunds and fees (through Stripe), desk shifts, and every member and staff message. BookingVendor and ShiftTool are retired at the end (§18.9) |
 | Front ends | Public website; desk operations app (web, plus a desktop app at each front desk); staff portal (web, plus a phone app) |
 | Shared services | Member sign-in, staff sign-in, gateway, notification service, help-article base, typed contracts |
 
 The studio names, sizes and outside-system names in this table are the reference values the spec uses. Everything else about the tenant (API details, group names, labour rules) is an open question (Q-11, Q-03). Its config is §4b.1.
 
-The gateway system keys are: `booking_vendor`, `shift_tool`, `payments` (the card processor), `calendar`, `llm`, `staff_directory`. Gusto has no gateway key, because Kairos makes no calls to Gusto (§18.8).
+The gateway system keys are: `booking_vendor`, `shift_tool`, `payments` (Stripe), `calendar`, `llm`, `staff_directory`. Gusto has no gateway key, because Kairos makes no calls to Gusto (§18.8).
 
 ## 18.2 Onboarding the tenant
 
@@ -55,7 +56,7 @@ None of the front ends contains scheduling logic. They render what the API retur
 | Cancel | `POST /bookings/{id}/cancel {preview: true}` → shows the penalty → `POST /bookings/{id}/cancel` (or the confirmation flow for agents, §11.6) |
 | Waitlist | `POST /sessions/{id}/waitlist`. Offer links call `POST /offers/{id}/accept`, which returns a hold, then `POST /bookings` confirms |
 | Account page | `GET /customers/me`, `GET /bookings?customer_id=me`, `GET /waitlist-entries?customer_id=me`, `GET /customers/me/entitlements`, `POST /entitlements/{id}/freeze`, `POST /entitlements/{id}/cancel`, `POST /customers/me/close`, `POST /customers/me/export` |
-| Checkout (packs and memberships) | Phases 1–4: BookingVendor's embedded checkout. Phase 5: processor checkout plus `POST /entitlements` |
+| Checkout (packs and memberships) | Phases 1–4: BookingVendor's embedded checkout. Phase 5: Stripe Checkout, then the webhook grants the entitlement (§18.10) |
 | AI chat assistant | Member support assistant (§18.4.4) |
 
 ### Desk operations app
@@ -154,6 +155,8 @@ What Kairos does for each staff, member and lifecycle write in each mode is the 
 3. **Bucket checksums.** Every night, for each domain and each local day from −30 to +60 days, compute `(count, sha256(sorted(id‖hash)))` on both sides. Drill into any day that differs.
 4. **Push verification** in owner mode: read back after write. A mismatch after 5 min raises `push_failed`.
 5. **Cross-domain conflicts and unmapped people**, raised during mirror ingestion.
+
+**Events from mirror ingestion.** When an apply changes a mirrored record's state, the same batch emits the matching §9.2 event with `source: mirror`: `session.created/cancelled/retimed/room_changed`; `booking.confirmed/cancelled/late_cancelled/checked_in/no_show`; `waitlist.joined/offered/expired` and `booking.confirmed{booked_via: waitlist}` when BookingVendor exposes them (A-17); `entitlement.granted/expiring/past_due/frozen`. With `member_messaging: kairos`, these drive the member workflows (D-51). Built-in behaviour never runs on them (§3A.2). The initial backfill emits no events.
 
 **Alerts:** any `cross_domain_conflict` or `unmapped_person`; drift above 0.5 % for 1 h; any item open more than 24 h; staleness above 15 min.
 
@@ -303,3 +306,28 @@ The cutover date is an export boundary: hours whose `scheduled_start` is before 
 | 5 | owner | owner | shadow → **owner** | owner (BookingVendor retired after 60 days) |
 
 **Phase 1, after the shifts cutover, is the acceptance-test configuration.** Classes are mirrored while desk shifts are owned. Appendix A.5 shows the refusal in all three orders. The refusal also holds during the 14-day shifts shadow, because the validator is always on (§3A.2). There it is reported as a disagreement on ShiftTool's shift rather than a refused Kairos write.
+
+## 18.10 Payments with Stripe
+
+Kairos uses **Stripe** for every card payment once the relevant domain is owned: drop-ins from the bookings cutover (Phase 4), packs and memberships from the members cutover (Phase 5). All calls go through the gateway (system key `payments`); Kairos never holds the Stripe secret key. Card data never reaches Kairos: members enter it in Stripe-hosted UI (the Payment Element or Stripe Checkout).
+
+| Kairos action | Stripe API | Notes |
+|---|---|---|
+| Member's payment identity | Customer (one per Kairos customer; ID kept as a payment reference) | Created on first price payment |
+| Drop-in at hold (§7.5) | PaymentIntent with `capture_method: manual`, amount from the quote; the website confirms it with the Payment Element | The authorisation ID goes in `POST /bookings {payment: {processor_authorization_id}}`; the engine checks amount and status before the confirm batch |
+| Capture after confirm (§7.5.4) | Capture the PaymentIntent (outbox, key `capture:{booking}`) | Final capture failure → studio cancel for that booking (§3A.12.3) |
+| Void (hold expired, approval rejected) | Cancel the PaymentIntent (key `void:{hold}`) | — |
+| Refund (timely, studio cancel, late refill under `as_timely_if_refilled`, partial proposals) | Refund (key `refund:{booking}:{kind}`) | Full or partial |
+| Late or no-show fee, fee reversal | Off-session PaymentIntent on the saved PaymentMethod (key `fee:{booking}:{kind}`); reversal = Refund of that charge | Needs a saved method with consent; without one, the fee becomes a manager task |
+| Saved card for fees and waitlist auto-charge | SetupIntent with consent text shown at signup or when joining a waitlist (`auto_charge_consent`) | `payment_method_ref` is the Stripe PaymentMethod ID |
+| Waitlist auto-charge (§7.7) | Off-session PaymentIntent, captured at once (key = waitlist entry ID) | Declined or needs authentication → entry `skipped` (`PAYMENT_FAILED`), offer flow instead |
+| Pack purchase | Checkout Session (`mode: payment`) for the product's `processor_price_ref` | `checkout.session.completed` webhook → `POST /entitlements` |
+| Membership | Checkout Session (`mode: subscription`) → Subscription | `invoice.paid` → renewal (§3A.15); `invoice.payment_failed` → `past_due`; `customer.subscription.deleted` → `cancelled` |
+| Freeze / unfreeze | Subscription `pause_collection` set / cleared | Within `product.freeze` limits |
+| Cancel membership | Cancel the Subscription (at period end or now) | `POST /entitlements/{id}/cancel` |
+
+**Webhooks.** Stripe → gateway, which verifies Stripe's signature → `POST /sync/inbound/payments`, signed by the gateway. Each is deduplicated by Stripe's event ID (§12.6) and applied idempotently.
+
+**Environments.** Preview uses Stripe **test mode** credentials in the gateway; the gateway refuses any preview call with live credentials (§13.1).
+
+**Before Phase 4,** BookingVendor takes and refunds payments for bookings it holds (D-44), and its payment receipts stay on (D-51).

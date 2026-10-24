@@ -13,6 +13,7 @@ tenant:
   closure_pay_notice: 2h
   closing_notice: 14d
   refund_credit_product: refund_credit
+  member_messaging: kairos   # Kairos sends every member and staff message (D-51)
   payroll_export:      # LOCKED. Placeholder headers: replace with the tenant's downloaded Gusto templates (Q-14)
     format: gusto_csv
     pay_period: { frequency: biweekly, anchor: "2027-03-01" }

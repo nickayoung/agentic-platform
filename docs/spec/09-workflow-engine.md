@@ -71,7 +71,11 @@ The domain of a `classes or shifts` event is the domain of the session's templat
 
 ## 9.3 Conditions
 
-- **Scope (D-51).** With `scope: owned` (the default), a run is created only when `event.domain` is `none` or its domain mode is `owner`. In addition, member recipients (`customer`, `session_customers`, `waitlist`) resolve to nobody unless `bookings` is `owner`, and `all_members` resolves to nobody unless `members` is `owner`. Each suppressed recipient is logged as `recipient_not_owned`. So, while BookingVendor holds the bookings, it alone messages members, and Kairos never duplicates its notices. `scope: all` lifts both restrictions. It is meant for staff-facing workflows on mirrored data, and validation warns `SCOPE_ALL_MEMBER_RECIPIENT` (§6.3) if a `scope: all` workflow notifies members.
+- **Scope (D-51).** Who messages members about records an outside system still holds is set once per tenant, by `tenant.member_messaging`:
+  - **`kairos`** (the reference tenant): Kairos sends every member and staff message, in every domain mode. The default workflow scope is `all`, so workflows also fire on events that mirror ingestion emits for outside records (`event.source = mirror`, §18.6). Member recipients always resolve. The outside system's own member messages are switched off at onboarding (§3A.3).
+  - **`record_holder`** (the schema default): the system that holds a record messages members about it. The default workflow scope is `owned`: a run is created only when `event.domain` is `none` or its domain mode is `owner`. Member recipients (`customer`, `session_customers`, `waitlist`) resolve to nobody unless `bookings` is `owner`, and `all_members` resolves to nobody unless `members` is `owner`; each suppressed recipient is logged as `recipient_not_owned`. Validation warns `SCOPE_ALL_MEMBER_RECIPIENT` (§6.3) if a workflow sets `scope: all` and notifies members.
+  - Relative triggers (`at: …`) are planned for mirrored sessions and bookings too when the effective scope is `all`, in the same batch as the mirror apply.
+  - A workflow's own `scope` overrides the tenant default. For example, a `kairos` tenant can keep a workflow on owned records only with `scope: owned`.
 - `trigger.where` filters events before a run is created.
 - `condition` is checked when the run is created, and again before each delayed action when `recheck_at_fire` is true (the default).
 - `action.when` gates a single action.

@@ -49,3 +49,14 @@ variants:
     then:
       - session: { external_id: BV-C-9004, status: scheduled }
       - outbox: { none_matching: "gateway.booking_vendor.cancel*" }
+      - outbox: { none_matching: "notify:*class_cancelled*" }        # nothing was cancelled, so no notice
+  - name: BookingVendor cancels a mirrored class; Kairos texts the members (D-51)
+    steps:
+      - mirror_event: { system: booking_vendor, type: class.updated,
+                        class: { id: BV-C-9005, type: VIN60, room: PS-1, start: "2027-03-13T08:00:00-05:00",
+                                 end: "2027-03-13T09:00:00-05:00", instructor: BV-1187, booked: 12 } }
+      - mirror_event: { system: booking_vendor, type: class.cancelled, class: { id: BV-C-9005 } }
+    then:
+      - event: { name: session.cancelled, source: mirror }
+      - outbox: { topic: notify, message: class_cancelled, recipients: 12 }
+      - outbox: { none_matching: "gateway.payments.*" }               # BookingVendor refunds its own bookings

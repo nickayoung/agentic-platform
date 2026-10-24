@@ -22,7 +22,8 @@
 | Q-16 | Do teaching and desk work have different pay rates in Gusto, and how does the employee template take hours per rate or job? | If yes, `split_by_kind: true`, with one row per kind mapped to the Gusto job; confirm against the template | Phase 1 |
 | Q-17 | *(Resolved: yes, 2 seats; D-45.)* | — | — |
 | Q-18 | Should a drop-in who cancels late be refunded if the mat is refilled (D-48)? | No (`refund.late: none`) | Phase 2 |
-| Q-19 | When BookingVendor cancels bookings for a class Kairos cancelled, does it also notify the members (A-15)? Refunds are confirmed (D-44) | Confirm against the sandbox before Phase 3 | Phase 3 |
+| Q-19 | *(Resolved: Kairos notifies members itself, D-51.)* | — | — |
+| Q-21 | Can BookingVendor's member notifications be switched off individually, keeping only its payment receipts (D-51, A-17)? | Check in BookingVendor's admin before go-live | Phase 1 |
 | Q-20 | Are teachers paid for a class cancelled for low attendance at T−2h (`closure_pay_notice` 2 h, D-55)? | Not at exactly 2 h; pay only for cancels under 2 h | Phase 3 |
 
 ## 17.2 Risks

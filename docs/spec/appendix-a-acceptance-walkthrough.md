@@ -22,7 +22,7 @@ These checks use only the schema (§4), the reference config (§4b.1) and the en
 | Desk shifts and coverage, with handover overlap | `kind: shift`, `participants: none`, `rostered`, `coverage`; 2-lane desks | CP-SAT (§8.3); lane-aware `COVERAGE_UNCOVERABLE` (§6.3) |
 | Labour and teaching rules, including "10 h between a closing and the next opening" | `constraints`; `desk_rest` uses `min_rest.from: closing`, `to: opening` | §8.3, §8.5 |
 | Late-cancel refunds for drop-ins | `refund.late: none` | §7.6 |
-| Substitute search, member and staff notices | `workflows`, default `scope: owned` | §9, §3A |
+| Substitute search, member and staff notices | `workflows`; `tenant.member_messaging: kairos` (Kairos sends every message) | §9, §3A |
 
 No business-specific code is involved. The engines never read `kind` (lint, §14.1). A script that runs the lane-aware coverage check over every studio and weekday of §4b.1 finds every interval coverable with 2-lane desks, and finds Dumbo uncoverable with 1 lane, which is why D-45 sets 2 lanes; the tenant confirmed two people can work that desk.
 
@@ -71,7 +71,7 @@ Maya is rostered for Tue 18:00 Hot 75 at Park Slope. At 12:00 she submits a sick
 
 The table above is the trace with **every domain owned** (Phase 4 onwards for the member effects).
 
-**Phase 3 (`classes = owner`, `bookings = shadow`).** Everything up to 16:30 is identical. At 16:30 the unstaffed check cancels the session in Kairos (claims released, Maya's voided hours stay voided, timers cancelled) and pushes `cancel` to BookingVendor with key `cancel:{session}` (§3A.9.4, D-44). Kairos writes no booking, ledger, refund or member-notify rows: `no_sub_notice` resolves to nobody because bookings aren't owned (D-51). BookingVendor cancels the 20 bookings and refunds the 4 drop-ins (confirmed, D-44), and texts members (A-15), and its cancellations are mirrored back. Shadow compares that outcome with Kairos's dry-run studio cancel. If the push fails 3 times (by about 16:40), `push_failed` drift raises the urgent manager task and the staff-chat page.
+**Phase 3 (`classes = owner`, `bookings = shadow`).** Everything up to 16:30 is identical. At 16:30 the unstaffed check cancels the session in Kairos (claims released, Maya's voided hours stay voided, timers cancelled) and pushes `cancel` to BookingVendor with key `cancel:{session}` (§3A.9.4, D-44). Kairos writes no booking, ledger or refund rows. `no_sub_notice` still texts the 20 members, because Kairos sends every message (D-51). BookingVendor cancels the 20 bookings and refunds the 4 drop-ins (confirmed, D-44), and its cancellations are mirrored back. Shadow compares that outcome with Kairos's dry-run studio cancel. If the push fails 3 times (by about 16:40), `push_failed` drift raises the urgent manager task and the staff-chat page.
 
 **Phases 1–2 (`classes = mirror`).** Maya's sick call vacates only her owned desk shifts. Cover for her class is arranged in BookingVendor (§3A.2), and her mirrored class claim keeps blocking that time for desk assignments.
 

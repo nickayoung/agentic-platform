@@ -80,7 +80,7 @@ Domain modes are stated per trace. Times are `America/New_York`.
 5. **Products.** Unlimited (freeze, cap 2/day), 10-pack (26 w), refund credit, intro month (first use). Schema: §4.9.
 6. **Desk.** Three rostered templates with per-day, per-studio `starts`; every desk has 2 lanes; three hard coverage rules. **Lane-aware `COVERAGE_UNCOVERABLE`:** the check script over every studio × weekday finds all intervals coverable (with 1 Dumbo lane it would fail Mon–Sat; the tenant confirmed 2 seats, D-45).
 7. **Labour rules.** `desk_week` (40 h, all work), `desk_rest` (10 h **closing → opening**, `min_rest.from/to`), `teach_day`, `teach_rest`, `transfer`, fairness, continuity, preferences, stability. Schema: §4.11 (2.1).
-8. **Reactions.** 36 workflows; every required-notice event in §9.2 has one, so there's no `NOTICE_MISSING`; all `scope: owned`.
+8. **Reactions.** 36 workflows; every required-notice event in §9.2 has one, so there's no `NOTICE_MISSING`; `tenant.member_messaging: kairos`, so Kairos sends every message (D-51).
 9. **Access.** Issuers, role mappings, staff role mappings (placeholders, Q-11).
 10. **No special-case code.** Engines read only requirements, capacity, scheduling, cost, policies, constraints and CEL. The `kind` lint (§14.1) allows only `packages/export`.
 11. **Fixture discipline.** The YAML in §4b is byte-identical to `fixtures/configs/*.yaml` (CI check). Both parse; Phase 0 acceptance requires the real validator to pass L1–L4 and the L5 probe to be feasible with a seeded staff set.
@@ -112,7 +112,7 @@ Modes: bookings `owner`. Class Tue 9 Mar 18:30 Vinyasa, Williamsburg, 36/36. Wai
 | 08:00:00.01 | Fay holds Mat 3 → assert 3 fails (reserved, no offer) → `409 PLACE_TAKEN` |
 | 08:00:00.05 | Gate runs promotion; the mode at 08:00 is `auto_promote` (until 16:30) |
 | 08:00:00.08 | Dana passes steps 3, 5–10; pack_10 covers her. One batch: booking `confirmed` on Mat 3, `booked_via: waitlist`; balance 3 → 2 with `reserve −1`; `reserved_for` cleared; entry `promoted`; `booked_count` 36 |
-| 08:00:01 | `booking.confirmed` (`booked_via = waitlist`) → `promoted_notice` → SMS through the notification service (bookings owned, so the recipient resolves, D-51) |
+| 08:00:01 | `booking.confirmed` (`booked_via = waitlist`) → `promoted_notice` → SMS through the notification service (Kairos sends every member message, D-51) |
 | 18:30:00 | Penalty (§3A.12.7): `place_refilled` = true (Dana's confirmed booking holds Mat 3) → waived: units `release` row (delta 0, unlimited); no fee; no strike. `booking.penalty_assessed{waived: true}`; `penalty_notice` does not fire (`where: !waived`) |
 
 Variants, each asserted in `a3_…`:
@@ -142,7 +142,7 @@ Variants, each asserted in `a4_…`:
 - **Two accept at once:** the unique index lets exactly one commit; the other gets `409 OFFER_FILLED`; one pending proposal.
 - **Ana became busy:** Ana (also `desk_staff` in this variant) is given desk_mid 16:00–20:00 at 12:06 (`201`, the proposal isn't committed). Approval at 12:15 → `RESOURCE_CONFLICT` → proposal `failed`, offer `lapsed`, outreach continues.
 - **Late accept:** a manager offers Ravi at 15:50 (expires 16:00); he accepts at 15:58 → proposal expires 17:30; at 16:30 the check defers once to 17:30 and emits `proposal.urgent` → `approval_urgent`; approved 16:45 → `scheduled`.
-- **Phase 3 (classes owner, bookings shadow):** the 16:30 session batch is identical; no booking, ledger, refund or member-notify rows; one push `gateway.booking_vendor.classes.cancel`; BookingVendor cancels and refunds (confirmed, D-44); 20 mirrored cancellations arrive; shadow compares them with the dry-run studio cancel.
+- **Phase 3 (classes owner, bookings shadow):** the 16:30 session batch is identical; no booking, ledger or refund rows; one push `gateway.booking_vendor.classes.cancel`; BookingVendor cancels and refunds (confirmed, D-44); 20 mirrored cancellations arrive; `no_sub_notice` texts the 20 members (D-51); shadow compares the outcome with the dry-run studio cancel.
 - **Phase 3, push fails:** after 3 attempts (by 16:40) `push_failed` drift → `cross_domain_alert` staff page + urgent task.
 - **Phases 1–2 (classes mirrored):** only owned desk shifts are vacated; the class claim stays; the portal links to BookingVendor.
 
@@ -168,7 +168,7 @@ Modes: classes, bookings, members `mirror`; shifts `owner` (Phase 1 after the sh
 
 **Order 3, unmapped teacher (Thu 11 Mar).** BV-2290 has no mapping → class `needs_mapping`, `unmapped_person` drift. Priya (a teacher) is assigned Dumbo `desk_open` 07:00–13:30 → overlaps the WB class 09:00–10:00 ± 40 min → `409 RESOURCE_CONFLICT` "unmapped teacher" (D-26); the solver has the same rule as `unmapped_blocks`.
 
-**Mode guard.** A mirrored class with 1 booking passes its minimum-attendance time: no cancel, no push (§3A.2). Member workflows send nothing (D-51).
+**Mode guard.** A mirrored class with 1 booking passes its minimum-attendance time: no cancel, no push (§3A.2). If BookingVendor itself cancels a mirrored class, mirror ingestion emits `session.cancelled{source: mirror}`, and Kairos texts its members (D-51; `a5_…` variant).
 
 **During the 14-day shifts shadow** (before the cutover), the same overlap on a ShiftTool shift is a validator disagreement, not a refused write (§18.9).
 
@@ -200,10 +200,17 @@ Fixture `a5_…` asserts all of this. **Pass.**
 | D-48 | DQ-5: no refund for a late-cancelled drop-in, even if refilled |
 | D-49 | DQ-6: studio-initiated session changes keep bookings and extend free cancellation |
 | D-50 | DQ-8: moves only before `free_cancel_until` |
-| D-51 | DQ-7: workflows don't message members about records Kairos doesn't own |
 | D-52 | DQ-9: sick calls can't be rejected; cancelling doesn't restore assignments |
 | D-53 | DQ-10: imported bookings get the active policy's terms |
 | D-54 | DQ-11: no hours records for mirrored work |
 | D-55 | DQ-12: pay protection for any short-notice studio cancel |
 
-**Confirmed in this round:** D-25 (yoga-only scope); D-45 (Dumbo desk seats 2); D-44 (BookingVendor cancels and refunds bookings when Kairos cancels a class).
+**Confirmed in this round:** D-25 (yoga-only scope); D-45 (Dumbo desk seats 2); D-44 (BookingVendor cancels and refunds bookings when Kairos cancels a class); D-51 (Kairos manages everything, including every member and staff message).
+
+## 6. Product-owner answers after the first draft
+
+| Answer | Effect on the spec |
+|---|---|
+| Dumbo desk seats 2 | D-45 confirmed; A-16 and Q-17 resolved; placeholder notes removed |
+| BookingVendor refunds on cancel | D-44 confirmed |
+| "Kairos manages everything and uses the Stripe API" | **D-51 reversed and confirmed:** new `tenant.member_messaging` (schema 2.1). The reference tenant uses `kairos`: Kairos sends every member and staff message in every domain mode; mirror ingestion emits events for observed outside changes (§18.6); BookingVendor's member messages are switched off at go-live (§3A.3), except receipts for its own charges until the payment cutovers. **Stripe** is the processor: new §18.10 maps every payment action to a Stripe API call through the gateway; schema 2.1 adds `processor_price_ref`; Phases 4–5 name Stripe. Target state in §18.1: Kairos manages everything except payroll (Gusto stays, a brief non-goal). A-15 and Q-19 resolved; A-17, A-18 and Q-21 added. An earlier answer kept checkout and refunds outside; this one supersedes it, so checkout and refunds move to Kairos with Stripe at their cutovers, as planned |

@@ -34,7 +34,7 @@ interface ConfigDocument {
 
 - Every collection is present. An empty collection is written as `[]`.
 - A minor bump to `schema_version` may only add optional fields. A major bump ships with a migration function (`migrate_2_to_3`) that is tested against every stored version.
-- **2.1** (spec v3.0) adds: `min_rest.from` / `min_rest.to` (§4.11), `refund.late` (§4.8), `WorkflowDef.scope` and a list form of `trigger.event` (§4.12). A 2.0 document is a valid 2.1 document with the defaults; publishing rewrites `schema_version` to `2.1`.
+- **2.1** (spec v3.0) adds: `min_rest.from` / `min_rest.to` (§4.11), `refund.late` (§4.8), `WorkflowDef.scope` and a list form of `trigger.event` (§4.12), `tenant.member_messaging` (§4.3), `processor_price_ref` (§4.9). A 2.0 document is a valid 2.1 document with the defaults; publishing rewrites `schema_version` to `2.1`.
 
 ### 4.1.1 Locked paths
 
@@ -83,6 +83,8 @@ interface TenantSettings {
   closure_pay_notice: Duration;          // §3A.16: a studio cancel committed less than this before start keeps staff hours; default "2h"
   closing_notice: Duration;              // notice to members when the tenant closes; default "14d"
   refund_credit_product: Key;            // pack granted when refund.timely = 'credit' (§4.8)
+  member_messaging?: 'kairos' | 'record_holder';   // 2.1; default 'record_holder'. Who messages members about records an
+                                         //   outside system still holds (§9.3, D-51)
   payroll_export: PayrollExportSettings; // LOCKED; Gusto CSV settings (§18.8.3)
   environment_guards: { preview_outbound: 'sandbox' | 'record_only' };   // LOCKED
 }
@@ -285,6 +287,7 @@ interface EntitlementProductDef extends FlagRef {
   priority: number;
   sold_by: 'platform' | 'external';
   price?: Money;
+  processor_price_ref?: string;          // 2.1: the processor's price ID for platform-sold products (Stripe Price, §18.10)
 }
 ```
 

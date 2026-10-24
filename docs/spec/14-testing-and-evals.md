@@ -124,8 +124,8 @@ Every row of §7.13 runs in each of the three modes. In `mirror`, the test asser
 
 Required cases:
 - In the Phase 1 configuration (classes mirrored), a mirrored class with 1 booking passes its minimum-attendance time, and Kairos does **not** cancel it.
-- In the Phase 3 configuration (classes owner, bookings shadow), an unstaffed cancel writes no booking, ledger, refund or member-notify rows. It writes exactly one outbox push `gateway.booking_vendor.classes.cancel`, and the dry-run studio cancel is compared with the mirrored outcome.
-- Workflow scope: with bookings mirrored, `class_reminder` and `no_sub_notice` create no notify outbox rows, and `recipient_not_owned` is logged.
+- In the Phase 3 configuration (classes owner, bookings shadow), an unstaffed cancel writes no booking, ledger or refund rows, and one `no_sub_notice` notify row per mirrored session customer. It writes exactly one outbox push `gateway.booking_vendor.classes.cancel`, and the dry-run studio cancel is compared with the mirrored outcome.
+- Workflow scope: with `member_messaging: kairos` and bookings mirrored, `class_reminder` and `no_sub_notice` notify the mirrored bookings' customers. With `record_holder`, they create no notify rows and `recipient_not_owned` is logged.
 - Each row of §3A.18's in-flight tables, for both directions.
 
 ### Static rule

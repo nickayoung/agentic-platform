@@ -82,7 +82,7 @@ variants:
       - outbox: { topic: gateway.booking_vendor.classes.cancel, count: 1 }
       - ledger: { kind: release, count: 0 }
       - outbox: { none_matching: "gateway.payments.*" }
-      - outbox: { none_matching: "notify:*class_cancelled*" }      # members hear from BookingVendor (D-44, D-51)
+      - outbox: { topic: notify, message: class_cancelled, recipients: 20 }   # Kairos texts members even though BookingVendor holds the bookings (D-51)
       - bookings: { session: ps_hot_1800@2027-03-09, state: cancelled, source: mirror, count: 20 }
   - name: Phase 3 — the cancel push fails
     domain_modes: { classes: owner, bookings: shadow, members: mirror, shifts: owner }

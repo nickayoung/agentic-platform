@@ -73,7 +73,7 @@ place:  { id: string; label: string; partition: string; attributes: map<string, 
 roster: { published_through: timestamp }
 event:  { name: string; at: timestamp; actor_type: string; reason: string|null;
           domain: 'classes'|'bookings'|'members'|'shifts'|'none';   // §9.2; drives workflow scope (§9.3)
-          source: 'platform'|'mirror'; data: map<string, dyn> }
+          source: 'platform'|'mirror'; data: map<string, dyn> }   // mirror: emitted by mirror ingestion for an observed outside change (§18.6)
 me:     { roles: list<string>; resource_id: string|null; customer_id: string|null; location_keys: list<string> }
 row (entity = session): session fields + { assigned_resource_ids: list<string>; template: Template; custom: map }
 row (other entities): the entity's public fields + custom

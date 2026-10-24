@@ -31,7 +31,7 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 - **Staff lifecycle:** onboarding and offboarding (§3A.6).
 - **Write-through façade** (§7.12): holds, bookings, cancellations and check-ins are forwarded to BookingVendor, with only the pre-checks run locally. Built-in policy behaviour stays off for mirrored domains (§7.13).
 - **Front ends:** the portal and desk app use `/assignments`, `/desk/now`, `/sessions?include=assignments`, `/tasks`, `/check-ins` (write-through), and the offline queue. The website timetable and mat map read the mirror, and bookings are written through.
-- **Workflows:** notify and create_task, with the timer driver; workflow `scope` and event domains (§9.3), so no member is messaged about mirrored records.
+- **Workflows:** notify and create_task, with the timer driver; workflow `scope`, event domains and events from mirror ingestion (§9.3, §18.6). With `member_messaging: kairos`, Kairos sends every member and staff message from go-live, and BookingVendor's member messages are switched off (§3A.3, D-51).
 
 **Acceptance**
 1. **A.5 passes on preview data seeded from production**, including the mode-guard variant (Kairos never cancels or promotes on mirrored classes). A teacher of a mirrored class can't be given an overlapping desk shift through the portal, the API or the solver. A conflicting mirror import raises `cross_domain_conflict` within 60 s. An unmapped teacher blocks desk assignments at that studio and time, and raises an alert.
@@ -76,8 +76,8 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 
 **Scope**
 - Bookings move to owner mode. Entitlement debits are written through to BookingVendor as a saga.
-- Drop-in checkout through processor authorisation via the gateway.
-- Fees and refunds through the gateway.
+- Drop-in checkout through Stripe PaymentIntents (manual capture), saved cards with SetupIntent consent, and waitlist auto-charge (§18.10).
+- Fees and refunds through Stripe via the gateway.
 
 **Acceptance**
 1. The A.3 suite and the A.4 owner-mode suite pass on production-like data: Kairos cancels bookings, refunds and notifies members itself. The bookings cutover follows §3A.18: imported bookings carry `origin: imported_at_cutover`, and BookingVendor waitlists are imported in order.
@@ -89,7 +89,7 @@ Every new behaviour ships behind a flag that is off by default (I-30). Each flag
 
 **Scope**
 - The members domain goes shadow → owner.
-- Processor subscriptions, dunning and freeze.
+- Stripe Checkout for packs and memberships; Stripe Billing subscriptions, dunning webhooks and freeze (`pause_collection`) (§18.10).
 - Account page and checkout fully on Kairos.
 - BookingVendor stays read-only for 60 days, then is retired.
 

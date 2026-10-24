@@ -25,6 +25,7 @@ v3.0 applies the third review (H-01 – H-28). The review is in [`docs/reviews/r
 - **Reference config fixed:** 2-lane desks (D-45), a closing → opening `desk_rest` (D-46), `refund.late: none`, and workflows for every required notice.
 - **Shifts go through shadow** before owner (D-47). **Substitute accepts** are single-creator and DB-guarded (D-57).
 - **Acceptance fixtures fixed and extended** (A.3–A.5).
+- **Kairos manages everything except payroll** (product owner): it sends every member and staff message from go-live (`tenant.member_messaging: kairos`, D-51), and uses **Stripe** for checkout, fees, refunds and memberships (§18.10).
 
 ## Contents
 

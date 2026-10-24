@@ -26,6 +26,7 @@ tenant:
   closure_pay_notice: 2h
   closing_notice: 14d
   refund_credit_product: refund_credit
+  member_messaging: kairos   # Kairos sends every member and staff message (D-51)
   payroll_export:      # LOCKED. Placeholder headers: replace with the tenant's downloaded Gusto templates (Q-14)
     format: gusto_csv
     pay_period: { frequency: biweekly, anchor: "2027-03-01" }
@@ -648,7 +649,7 @@ access:
 - **Desk lanes.** Opening and closing shifts overlap at handover (Dumbo weekdays 12:00–13:30, Saturdays 12:00–14:30 with the mid shift). Every desk therefore has 2 lanes; the tenant confirmed that two people can work the Dumbo desk at once (D-45). With 1 lane, `COVERAGE_UNCOVERABLE` fails validation (§6.3).
 - **`desk_rest`** applies only from a `closing` shift to the next `opening` shift (`min_rest.from` / `to`, §4.11, D-46). An opening shift followed by an evening class or a mid shift is not restricted by it; `teach_rest` (15 min) and the no-overlap rule still apply.
 - **Refunds.** `refund.late: none`: a drop-in who cancels late gets no money back, even if the mat is refilled (D-48, Q-18). Units and the membership fee still follow `waive_if`.
-- **Workflows.** Every *required notice* event in §9.2 has a workflow, so validation reports no `NOTICE_MISSING`. All workflows use the default `scope: owned` (§9.3). So, while bookings are mirrored, member-facing workflows (`class_reminder`, `no_sub_notice`, …) send nothing, and BookingVendor keeps messaging its members (D-51). Staff-facing workflows on owned shifts run from Phase 1.
+- **Workflows.** Every *required notice* event in §9.2 has a workflow, so validation reports no `NOTICE_MISSING`. `tenant.member_messaging: kairos` makes `scope: all` the default (§9.3), so Kairos sends every message from go-live, including reminders and cancellation notices for classes and bookings still mirrored from BookingVendor. BookingVendor's member messages are switched off at go-live (D-51, §3A.3).
 
 ## 4b.2 Yoga starter config (one studio, pooled, packs only)
 

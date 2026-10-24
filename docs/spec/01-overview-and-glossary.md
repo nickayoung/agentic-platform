@@ -105,7 +105,7 @@ Two further components work on top of the engines:
 | **Coverage requirement** | The minimum and target desk staffing per studio and time of day. |
 | **Hours record** | One assignment's scheduled and worked time, used for the payroll export; exists only for owned domains (§3A.16). |
 | **Workflow** | Trigger → condition → actions. Actions can be delayed. A **workflow run** is one execution for one event or time anchor. |
-| **Workflow scope** | `owned` (default): a workflow runs only for events whose domain Kairos owns, and member recipients resolve only when Kairos owns the bookings or members. `all` lifts this (§9.3). |
+| **Workflow scope** | `all`: a workflow also runs for events about records mirrored from an outside system. `owned`: only for events whose domain Kairos owns. The default comes from `tenant.member_messaging` (`kairos` → `all`; `record_holder` → `owned`, with member recipients resolving only for owned bookings or members) (§9.3). |
 | **Event domain** | The data domain an event belongs to (`classes`, `bookings`, `members`, `shifts`, or `none`), carried as `event.domain` (§9.2). |
 | **Required notice** | An event that a config must route to a `notify` workflow, or validation warns `NOTICE_MISSING` (§9.2). |
 | **Outbox** | The table of side effects (messages, pushes, money jobs) written in the same batch as the state change and delivered after commit with retries (§12.6). |
