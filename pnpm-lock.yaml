@@ -48,6 +48,31 @@ importers:
         specifier: workspace:*
         version: link:../../packages/errors
 
+  apps/core:
+    dependencies:
+      '@kairos/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@kairos/errors':
+        specifier: workspace:*
+        version: link:../../packages/errors
+      '@kairos/scheduler':
+        specifier: workspace:*
+        version: link:../../packages/scheduler
+    devDependencies:
+      '@cloudflare/vitest-plugin':
+        specifier: 1.4.7
+        version: 1.4.7(@cloudflare/workers-types@5.20261024.1)(@types/node@22.20.5)(vitest@4.1.12(@types/node@22.20.5)(vite@8.3.5(@types/node@22.20.5)(esbuild@0.28.2)))
+      '@cloudflare/workers-types':
+        specifier: 5.20261024.1
+        version: 5.20261024.1
+      '@types/node':
+        specifier: ^22.20.5
+        version: 22.20.5
+      vitest:
+        specifier: 4.1.12
+        version: 4.1.12(@types/node@22.20.5)(vite@8.3.5(@types/node@22.20.5)(esbuild@0.28.2))
+
   packages/crypto: {}
 
   packages/db:
