@@ -1,0 +1,16 @@
+{
+  "name": "kairos-api-test",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "ENVIRONMENT": "preview", "PLATFORM_ADMIN_TOKEN": "admin-secret", "GATEWAY_URL": "https://gateway.test/v1" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "TENANT_CORE", "class_name": "TenantCore" },
+      { "name": "CONTROL", "class_name": "ControlPlane" }
+    ]
+  },
+  "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "kairos-archive-test" }],
+  "secrets_store_secrets": [{ "binding": "KEK", "store_id": "test-store", "secret_name": "kairos-kek-test" }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantCore", "ControlPlane"] }]
+}

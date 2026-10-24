@@ -1,0 +1,29 @@
+{
+  "name": "@kairos/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run",
+    "openapi": "tsx scripts/openapi.ts",
+    "dev": "wrangler dev --env preview",
+    "deploy:preview": "wrangler deploy --env preview",
+    "deploy:production": "wrangler deploy --env production"
+  },
+  "dependencies": {
+    "@hono/zod-openapi": "1.6.3",
+    "@kairos/control": "workspace:*",
+    "@kairos/core": "workspace:*",
+    "@kairos/errors": "workspace:*",
+    "hono": "4.13.13",
+    "jose": "6.2.13",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.7",
+    "@cloudflare/workers-types": "5.20261024.1",
+    "@types/node": "^22.20.5",
+    "vitest": "4.1.12"
+  }
+}

@@ -10,9 +10,27 @@ export const controlMigrations: readonly Migration[] = [{ id: '0001_control', sq
 
 export type TenantState = 'provisioning' | 'onboarding' | 'live' | 'offboarding' | 'closed' | 'deleted';
 
+/** Same shape as the config's `access` issuers and role mappings (§4.13); used until a config is published. */
+export interface IssuerDef {
+  key: string;
+  audience: 'member' | 'staff';
+  issuer: string;
+  jwks_url: string;
+  subject_claim: string;
+  tenant_claim: string;
+  /** Expected `aud` value; §4.13 doesn't name one, so it defaults to "kairos". */
+  aud?: string;
+}
+export interface RoleMapping {
+  issuer: string;
+  claim: string;
+  equals: string;
+  grant: 'owner' | 'admin' | 'manager' | 'desk' | 'instructor' | 'staff' | 'member' | 'guest';
+  location_claim?: string;
+}
 export interface IdentityConfig {
-  member: { issuer: string; audience: string; jwks_url: string };
-  staff: { issuer: string; audience: string; jwks_url: string };
+  issuers: IssuerDef[];
+  role_mappings: RoleMapping[];
 }
 
 export interface TenantRecord {
