@@ -52,3 +52,8 @@ The subset of §11 the MVP console uses. Base: `https://kairos-api-preview.lucky
 - `GET /hours?from=<ms>&to=<ms>` → `{ items: [{ id, resource_id, name, kind, location_key, start, end, minutes, state }] }`
 - `POST /hours/{id}/approve` → the record
 - `GET /hours/export?period_start=YYYY-MM-DD` → `text/csv` Gusto employee CSV for the pay period (§18.8)
+
+## Sync (§18.5)
+
+- `GET /sync/drift` (managers) → `{ items: [{ id, kind, external_id, detail, created_at }] }`: open drift items such as `unmapped_person` and `cross_domain_conflict`
+- `POST /sync/poll { system: 'booking_vendor'|'shift_tool', entity }` (owner/admin) → `{ system, entity, records, changed, error? }`: poll now instead of waiting for the next tick
