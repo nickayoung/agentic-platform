@@ -1,0 +1,17 @@
+{
+  "name": "@kairos/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@kairos/errors": "workspace:*",
+    "canonicalize": "5.1.0"
+  }
+}
