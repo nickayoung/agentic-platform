@@ -11,7 +11,13 @@
   "env": {
     "preview": {
       "name": "kairos-api-preview",
-      "vars": { "ENVIRONMENT": "preview" },
+      "vars": {
+        "ENVIRONMENT": "preview",
+        "DEV_IDP_HOST": "kairos-dev-idp.lucky-shadow-edb4.workers.dev",
+        "CONSOLE_ORIGINS": "http://localhost:3000"
+      },
+      // preview only: the demo sign-in service (apps/dev-idp)
+      "services": [{ "binding": "DEV_IDP", "service": "kairos-dev-idp" }],
       "triggers": { "crons": ["*/5 * * * *"] },
       "durable_objects": {
         "bindings": [
@@ -21,7 +27,7 @@
         ]
       },
       "r2_buckets": [{ "binding": "ARCHIVE", "bucket_name": "kairos-archive-preview" }],
-      "secrets_store_secrets": [{ "binding": "KEK", "store_id": "REPLACE_WITH_STORE_ID", "secret_name": "kairos-kek-preview" }]
+      "secrets_store_secrets": [{ "binding": "KEK", "store_id": "4f72ea73006c430bb167d93045048cac", "secret_name": "kairos-kek-preview" }]
     },
     "production": {
       "name": "kairos-api-production",

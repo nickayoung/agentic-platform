@@ -2,7 +2,7 @@
 // tenant and environment claims against the path (§11.2). Roles come from the access role mappings (§4.13).
 import { KairosError } from '@kairos/errors';
 import type { IdentityConfig, IssuerDef, RoleMapping } from '@kairos/control';
-import { createRemoteJWKSet, decodeJwt, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, customFetch, decodeJwt, jwtVerify, type JWTPayload } from 'jose';
 
 export type PlatformRole = RoleMapping['grant'];
 
@@ -16,11 +16,21 @@ export interface Principal {
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
-const jwks = (url: string) => {
+/**
+ * Fetchers for key-set hosts reachable only through a service binding. A Worker can't fetch another Worker on the
+ * same account over workers.dev, so preview's demo issuer is bound instead (keyed by host).
+ */
+export type JwksFetchers = Record<string, Fetcher>;
+
+const jwks = (url: string, fetchers: JwksFetchers = {}) => {
   let set = jwksCache.get(url);
   if (!set) {
     // keys cached for 10 minutes, refreshed early on an unknown kid (§13.2)
-    set = createRemoteJWKSet(new URL(url), { cacheMaxAge: 600_000, cooldownDuration: 30_000 });
+    const bound = fetchers[new URL(url).host];
+    set = createRemoteJWKSet(new URL(url), {
+      cacheMaxAge: 600_000, cooldownDuration: 30_000,
+      ...(bound ? { [customFetch]: (u: string, o: RequestInit) => bound.fetch(u, o) } : {}),
+    });
     jwksCache.set(url, set);
   }
   return set;
@@ -44,6 +54,7 @@ export async function authenticate(
   header: string | undefined,
   identity: IdentityConfig,
   expect: { tenantId: string; env: string },
+  fetchers: JwksFetchers = {},
 ): Promise<Principal> {
   const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined;
   if (!token) throw new KairosError('UNAUTHENTICATED');
@@ -57,7 +68,7 @@ export async function authenticate(
   if (!issuer) throw new KairosError('UNAUTHENTICATED', { message: 'unknown issuer' });
   let payload: JWTPayload;
   try {
-    ({ payload } = await jwtVerify(token, jwks(issuer.jwks_url), {
+    ({ payload } = await jwtVerify(token, jwks(issuer.jwks_url, fetchers), {
       issuer: issuer.issuer, audience: issuer.aud ?? 'kairos', clockTolerance: 60, requiredClaims: ['exp'],
     }));
   } catch (e) {

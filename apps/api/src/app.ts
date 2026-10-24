@@ -2,6 +2,7 @@
 // with the route's Zod schema and calls the tenant's object over RPC (§19.1). Routes and the OpenAPI document come
 // from the same definitions (§19.11).
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { cors } from 'hono/cors';
 import type { TenantRecord } from '@kairos/control';
 import type { Scope } from '@kairos/core';
 import { KairosError } from '@kairos/errors';
@@ -72,6 +73,14 @@ export function buildApp() {
     },
   });
 
+  // browsers: only the configured console origins; bearer tokens, no cookies
+  app.use('*', (c, next) => cors({
+    origin: (o) => ((c.env.CONSOLE_ORIGINS ?? '').split(',').map((s) => s.trim()).includes(o) ? o : null),
+    allowHeaders: ['authorization', 'content-type', 'if-match', 'idempotency-key', 'x-request-id'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    exposeHeaders: ['etag', 'x-request-id'],
+    maxAge: 600,
+  })(c, next));
   app.use('*', async (c, next) => {
     c.set('requestId', c.req.header('x-request-id') ?? `req_${crypto.randomUUID().replaceAll('-', '')}`);
     await next();
@@ -92,7 +101,8 @@ export function buildApp() {
     c.set('scope', scope);
     // inbound events are signed by the gateway instead of carrying a user token (§18.3)
     if (!INBOUND_PATH.test(c.req.path)) {
-      c.set('principal', await authenticate(c.req.header('authorization'), tenant.identity, { tenantId: tenant.id, env }));
+      c.set('principal', await authenticate(c.req.header('authorization'), tenant.identity, { tenantId: tenant.id, env },
+        c.env.DEV_IDP && c.env.DEV_IDP_HOST ? { [c.env.DEV_IDP_HOST]: c.env.DEV_IDP } : {}));
     }
     await next();
   });
