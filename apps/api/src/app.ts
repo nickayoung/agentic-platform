@@ -5,6 +5,7 @@ import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import type { TenantRecord } from '@kairos/control';
 import type { ActorRef, CallContext, Scope } from '@kairos/core';
 import { KairosError } from '@kairos/errors';
+import { verifySignature } from '@kairos/sync';
 import { authenticate, requireRole, sameSecret, type Principal } from './auth';
 import { controlStub, type Env } from './env';
 import { problem } from './problem';
@@ -30,6 +31,10 @@ async function resolveTenant(env: Env, slug: string): Promise<TenantRecord> {
 
 export const coreStub = (env: Env, s: Scope) =>
   env.TENANT_CORE.get(env.TENANT_CORE.idFromName(`${s.tenant}:${s.env}`), { locationHint: 'enam' });
+export const syncStub = (env: Env, s: Scope) =>
+  env.TENANT_SYNC.get(env.TENANT_SYNC.idFromName(`${s.tenant}:${s.env}`), { locationHint: 'enam' });
+
+const INBOUND_PATH = /^\/v1\/t\/[^/]+\/[^/]+\/sync\/inbound\//;
 
 const actorOf = (p: Principal): ActorRef =>
   p.kind === 'member' ? { type: 'member', subject: p.subject } : { type: 'staff', subject: p.subject, roles: p.roles };
@@ -108,7 +113,10 @@ export function buildApp() {
     const scope: Scope = { tenant: tenant.slug, env: env as Scope['env'] };
     c.set('tenant', tenant);
     c.set('scope', scope);
-    c.set('principal', await authenticate(c.req.header('authorization'), tenant.identity, { tenantId: tenant.id, env }));
+    // inbound events are signed by the gateway instead of carrying a user token (§18.3)
+    if (!INBOUND_PATH.test(c.req.path)) {
+      c.set('principal', await authenticate(c.req.header('authorization'), tenant.identity, { tenantId: tenant.id, env }));
+    }
     await next();
   });
 
@@ -155,6 +163,30 @@ export function buildApp() {
     },
   );
 
+  // inbound outside events (§18.3, §12.6): signed and timestamped by the gateway; duplicates are acknowledged and dropped
+  app.openapi(
+    createRoute({
+      method: 'post', path: '/v1/t/{tenant_slug}/{env}/sync/inbound/{system}',
+      request: {
+        params: TenantParams.extend({ system: z.enum(['booking_vendor', 'shift_tool', 'staff_directory', 'payments']).openapi({ param: { name: 'system', in: 'path' } }) }),
+        headers: z.object({ 'x-gateway-signature': z.string() }),
+      },
+      responses: { 200: { description: 'Accepted or duplicate', content: { 'application/json': { schema: z.object({ duplicate: z.boolean() }) } } }, ...errors },
+    }),
+    async (c) => {
+      const raw = await c.req.text();
+      const secret = c.env.GATEWAY_SIGNING_SECRET;
+      if (!secret || !(await verifySignature(secret, c.req.header('x-gateway-signature') ?? null, raw, Date.now()))) {
+        throw new KairosError('UNAUTHENTICATED', { message: 'bad or stale gateway signature' });
+      }
+      let body: { event_id?: unknown };
+      try { body = JSON.parse(raw) as { event_id?: unknown }; } catch { throw new KairosError('SCHEMA_INVALID', { message: 'body is not JSON' }); }
+      if (typeof body.event_id !== 'string' || body.event_id === '') throw new KairosError('SCHEMA_INVALID', { message: 'event_id is required' });
+      const fresh = await syncStub(c.env, c.get('scope')).receive(c.get('scope'), c.req.valid('param').system, body.event_id, body);
+      return c.json({ duplicate: !fresh }, 200);
+    },
+  );
+
   // platform admin: provisioning (§3A.3)
   app.openapi(
     createRoute({
@@ -173,6 +205,7 @@ export function buildApp() {
       const t = await controlStub(c.env).createTenant(body, actor, c.get('requestId'));
       const scope: Scope = { tenant: t.slug, env: c.env.ENVIRONMENT };
       await coreStub(c.env, scope).init({ scope, actor, requestId: c.get('requestId') });
+      await syncStub(c.env, scope).init(scope);
       return c.json({ id: t.id, slug: t.slug, state: t.state }, 201);
     },
   );

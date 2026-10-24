@@ -1,0 +1,9 @@
+{
+  "name": "kairos-sync-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "GATEWAY_URL": "https://gateway.test/v1", "SERVICE_TOKEN": "svc" },
+  "durable_objects": { "bindings": [{ "name": "TENANT_SYNC", "class_name": "TenantSync" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantSync"] }]
+}

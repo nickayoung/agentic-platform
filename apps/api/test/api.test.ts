@@ -1,6 +1,7 @@
 import { adminSecretsStore, createExecutionContext, createScheduledController, env, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { sign } from '@kairos/sync';
 import worker from '../src/index';
 
 const ISS = 'https://staff.signin.test';
@@ -143,6 +144,25 @@ describe('kairos-api', () => {
       method: 'PUT', headers: { authorization: `Bearer ${owner}`, 'content-type': 'application/json' }, body: JSON.stringify({ enabled: 'yes' }),
     });
     expect(res.status).toBe(422);
+  });
+
+  it('accepts signed inbound events once and refuses unsigned or stale ones (§18.3, §12.6)', async () => {
+    const t = await provision();
+    const path = `/v1/t/${t.slug}/preview/sync/inbound/booking_vendor`;
+    const body = JSON.stringify({ event_id: 'bv_evt_1', kind: 'booking.created' });
+    const post = async (sig: string | null, b = body) => call(path, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(sig ? { 'x-gateway-signature': sig } : {}) }, body: b,
+    });
+    const ts = Math.floor(Date.now() / 1000);
+    const good = `t=${ts},v1=${await sign('gw-secret', ts, body)}`;
+    const r1 = await post(good);
+    expect(r1.status).toBe(200);
+    expect(await r1.json()).toEqual({ duplicate: false });
+    expect(await (await post(good)).json()).toEqual({ duplicate: true });
+    const old = ts - 600;
+    expect((await post(`t=${old},v1=${await sign('gw-secret', old, body)}`)).status).toBe(401);
+    expect((await post(good, body.replace('created', 'cancelled'))).status).toBe(401);
+    expect((await post(null)).status).toBe(422);
   });
 
   it('serves the OpenAPI 3.1 document', async () => {

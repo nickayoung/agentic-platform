@@ -2,10 +2,11 @@
 // own packages (§19.15).
 import { ControlPlane } from '@kairos/control';
 import { TenantCore } from '@kairos/core';
+import { TenantSync } from '@kairos/sync';
 import { buildApp, coreStub } from './app';
 import { controlStub, type Env } from './env';
 
-export { ControlPlane, TenantCore };
+export { ControlPlane, TenantCore, TenantSync };
 
 const app = buildApp();
 
