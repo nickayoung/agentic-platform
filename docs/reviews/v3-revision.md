@@ -1,6 +1,6 @@
 # Kairos spec v3.0: revision notes for review 3
 
-**Inputs:** the brief; spec v2.1 + Gusto CSV (commit `3b59747`, the "version 1" of this revision); review 3 (`docs/reviews/review-3.md`, H-01 – H-28); product-owner answers. The product owner answered one question in this round: **keep yoga-only scope (D-25)**. No other answers were supplied, so every other "Decision the spec must make" uses the reviewer's recommended answer and is marked **Assumed, not confirmed** in §16.
+**Inputs:** the brief; spec v2.1 + Gusto CSV (commit `3b59747`, the "version 1" of this revision); review 3 (`docs/reviews/review-3.md`, H-01 – H-28); product-owner answers. The product owner answered one question in this round: **keep yoga-only scope (D-25)**. No other answers were supplied, so every other "Decision the spec must make" used the reviewer's recommended answer. The product owner later confirmed all of them (§6).
 
 **Output:** spec v3.0 in `docs/spec/` (part 4 of the deliverable: complete, with no references to earlier versions for content), fixtures, scenarios and evals updated to match. Spec v3.0 is the "version 2" the revision method asks for. It is numbered 3.0 because the repository already used 2.0 and 2.1.
 
@@ -59,7 +59,7 @@ No finding was rejected.
 | §13 Security | Section refs; per-event audit pointer; sub finder no longer proposes | H-07, H-06 |
 | §14 Testing | New invariants (hours, accepted offers, no writes on unowned domains, sagas); concurrency rows (double accept, retime vs hold); mixed-mode and scope cases; lifecycle and config-rule suites; DSL keys `outside`, `send_offer`, `pays`; lint scope for `kind` | H-01, H-06, H-08, H-13, H-03, H-02, H-28, H-04 |
 | §15 Delivery plan | Phase 0: schema 2.1, saga runner, lane-aware validator and L5 probe on the fixture. Phase 1: shifts shadow → owner, scope rule, revised hours gate. Phase 3: session edits, adoption, mixed-mode cancel, `invoke_hook` + H3, ShiftTool retirement gate. Phase 4: owner-mode A.3/A.4 suites and the cutover in-flight rules | H-05, H-27, H-01, H-12, H-02 |
-| §16 Decisions | D-44 – D-60 (D-44 – D-55 assumed, not confirmed); A-15, A-16; §16.5 trace; old trace refs updated | all |
+| §16 Decisions | D-44 – D-60 (D-44 – D-55 all confirmed by the product owner); A-15, A-16; §16.5 trace; old trace refs updated | all |
 | §17 Questions, risks | Q-17 – Q-20; R-11, R-12 | H-02, H-09, H-01, H-08 |
 | §18 Reference deployment | Shifts shadow in onboarding and cutover order; front-end API rows fixed; shift mapping; §18.5.1 table moved to §3A.2; shadow disagreement table per domain; in-flight pointer; hours lifecycle pointer | H-05, H-14, H-26, H-07, H-12, H-08 |
 | Appendix A | A.1 rows for lanes, scoped rest, late refund, notices; A.3 two variants; A.4 accept batch, busy variant, Phase 3 trace; A.5 step 7 | H-02, H-03, H-09, H-25, H-06, H-01, H-04 |
@@ -191,21 +191,9 @@ Fixture `a5_…` asserts all of this. **Pass.**
 - **H-01:** BookingVendor refunding on cancel is confirmed (D-44). Only whether it also **notifies members** is still assumed (A-15, Q-19). If it doesn't, `no_sub_notice` runs with `scope: all` during Phase 3.
 - **H-12 (rollback of waitlists):** pushing Kairos waitlists back to BookingVendor depends on BookingVendor support; otherwise it degrades to manager tasks (§3A.18).
 
-**Decisions marked "Assumed, not confirmed"** (reviewer's recommended answers; no product-owner answer was supplied):
+**Decisions marked "Assumed, not confirmed":** none. The product owner confirmed D-46 – D-50 and D-52 – D-55 as recommended (DQ-3 – DQ-6, DQ-8 – DQ-12).
 
-| Decision | Question |
-|---|---|
-| D-46 | DQ-3: `desk_rest` applies closing → opening only |
-| D-47 | DQ-4: shifts go through 14 days of shadow |
-| D-48 | DQ-5: no refund for a late-cancelled drop-in, even if refilled |
-| D-49 | DQ-6: studio-initiated session changes keep bookings and extend free cancellation |
-| D-50 | DQ-8: moves only before `free_cancel_until` |
-| D-52 | DQ-9: sick calls can't be rejected; cancelling doesn't restore assignments |
-| D-53 | DQ-10: imported bookings get the active policy's terms |
-| D-54 | DQ-11: no hours records for mirrored work |
-| D-55 | DQ-12: pay protection for any short-notice studio cancel |
-
-**Confirmed in this round:** D-25 (yoga-only scope); D-45 (Dumbo desk seats 2); D-44 (BookingVendor cancels and refunds bookings when Kairos cancels a class); D-51 (Kairos manages everything, including every member and staff message).
+**Confirmed in this round:** D-25 (yoga-only scope); D-45 (Dumbo desk seats 2); D-44 (BookingVendor cancels and refunds bookings when Kairos cancels a class); D-51 (Kairos manages everything, including every member and staff message); D-46 – D-50 and D-52 – D-55 as recommended.
 
 ## 6. Product-owner answers after the first draft
 
@@ -214,3 +202,4 @@ Fixture `a5_…` asserts all of this. **Pass.**
 | Dumbo desk seats 2 | D-45 confirmed; A-16 and Q-17 resolved; placeholder notes removed |
 | BookingVendor refunds on cancel | D-44 confirmed |
 | "Kairos manages everything and uses the Stripe API" | **D-51 reversed and confirmed:** new `tenant.member_messaging` (schema 2.1). The reference tenant uses `kairos`: Kairos sends every member and staff message in every domain mode; mirror ingestion emits events for observed outside changes (§18.6); BookingVendor's member messages are switched off at go-live (§3A.3), except receipts for its own charges until the payment cutovers. **Stripe** is the processor: new §18.10 maps every payment action to a Stripe API call through the gateway; schema 2.1 adds `processor_price_ref`; Phases 4–5 name Stripe. Target state in §18.1: Kairos manages everything except payroll (Gusto stays, a brief non-goal). A-15 and Q-19 resolved; A-17, A-18 and Q-21 added. An earlier answer kept checkout and refunds outside; this one supersedes it, so checkout and refunds move to Kairos with Stripe at their cutovers, as planned |
+| "Confirm the rest of the assumed decisions" | D-46 – D-50 and D-52 – D-55 confirmed as written; Q-02, Q-18 and Q-20 resolved. No assumed decisions remain |

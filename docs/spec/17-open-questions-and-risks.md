@@ -5,7 +5,7 @@
 | ID | Question | Recommended answer | Needed by |
 |---|---|---|---|
 | Q-01 | Does BookingVendor support reserving a mat during checkout? | If not, mirror-mode holds are advisory and the "taken" result comes from BookingVendor (§7.12) | Phase 2 |
-| Q-02 | When a studio closes at short notice, are desk staff paid for the shift? | Pay if the closure is posted less than 2 h before the shift (`closure_pay_notice`) | Phase 1 |
+| Q-02 | *(Resolved: staff are paid for any studio cancel committed less than `closure_pay_notice` (2 h) before start; D-55.)* | — | — |
 | Q-03 | Should instructors who also work the desk have a total weekly cap above the desk cap (New York labour rules)? | Keep 40 h combined until legal confirms | Phase 1 |
 | Q-04 | Are workshops (multi-session series sold as one product) and per-mat surcharges needed? | Out of v2.0; consider for schema 2.1 | Phase 6 |
 | Q-05 | Should a desk shift be vacated automatically when BookingVendor assigns that person a class over it (D-34)? | Not at first. Revisit after 30 days of Phase 1 conflict data | Phase 1 + 30 d |
@@ -21,10 +21,10 @@
 | Q-15 | Are teachers employees or contractors in Gusto? Are any desk staff contractors? | Set `payroll_type` per person at onboarding | Phase 1 |
 | Q-16 | Do teaching and desk work have different pay rates in Gusto, and how does the employee template take hours per rate or job? | If yes, `split_by_kind: true`, with one row per kind mapped to the Gusto job; confirm against the template | Phase 1 |
 | Q-17 | *(Resolved: yes, 2 seats; D-45.)* | — | — |
-| Q-18 | Should a drop-in who cancels late be refunded if the mat is refilled (D-48)? | No (`refund.late: none`) | Phase 2 |
+| Q-18 | *(Resolved: no refund for a late-cancelled drop-in, even if refilled; D-48.)* | — | — |
 | Q-19 | *(Resolved: Kairos notifies members itself, D-51.)* | — | — |
 | Q-21 | Can BookingVendor's member notifications be switched off individually, keeping only its payment receipts (D-51, A-17)? | Check in BookingVendor's admin before go-live | Phase 1 |
-| Q-20 | Are teachers paid for a class cancelled for low attendance at T−2h (`closure_pay_notice` 2 h, D-55)? | Not at exactly 2 h; pay only for cancels under 2 h | Phase 3 |
+| Q-20 | *(Resolved: a cancel at exactly 2 h before start is not pay-protected; D-55.)* | — | — |
 
 ## 17.2 Risks
 
