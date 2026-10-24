@@ -1,0 +1,16 @@
+// kairos-console (§19.14): the staff console, a TanStack Start app served by this Worker. It is a plain API client:
+// the browser calls API_BASE with the staff bearer token; the Worker only renders the shell and hands the two base
+// URLs below to the page. No bindings to the API or its Durable Objects.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "kairos-console",
+  "main": "@tanstack/react-start/server-entry",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "vars": {
+    "API_BASE": "https://kairos-api-preview.lucky-shadow-edb4.workers.dev/v1/t/lotus-line/preview",
+    // preview only: the demo sign-in service (apps/dev-idp)
+    "IDP_BASE": "https://kairos-dev-idp.lucky-shadow-edb4.workers.dev"
+  }
+}
