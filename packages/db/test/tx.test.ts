@@ -59,3 +59,14 @@ describe('Db.tx (§12.2, §19.2)', () => {
       expect(db.tx((tx) => tx.maybe('SELECT y FROM lanes WHERE y = 99'))).toBeUndefined();
     }));
 });
+
+describe('Tx.run', () => {
+  it('returns rows changed, not index entries written', () =>
+    withDb((db) => {
+      db.tx((tx) => tx.run(`INSERT INTO saga (id, kind, step, state, lease_until, payload, created_at) VALUES ('s', 'k', 0, 'running', 0, '{}', 0)`));
+      expect(db.tx((tx) => tx.run(`UPDATE saga SET state = 'done', lease_until = 5 WHERE id = 's'`))).toBe(1);
+      expect(db.tx((tx) => tx.run(`UPDATE saga SET state = 'done' WHERE id = 'nope'`))).toBe(0);
+      expect(db.tx((tx) => tx.run(`INSERT INTO limit_counter (key, count, max, window_end) VALUES ('a', 0, 1, 0) ON CONFLICT DO NOTHING`))).toBe(1);
+      expect(db.tx((tx) => tx.run(`INSERT INTO limit_counter (key, count, max, window_end) VALUES ('a', 0, 1, 0) ON CONFLICT DO NOTHING`))).toBe(0);
+    }));
+});

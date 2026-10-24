@@ -13,7 +13,10 @@ export interface Tx {
   one<R extends Row = Row>(sql: string, ...params: SqlValue[]): R;
   /** Zero or one row. */
   maybe<R extends Row = Row>(sql: string, ...params: SqlValue[]): R | undefined;
-  /** A write; returns the number of rows written. */
+  /**
+   * A write; returns the number of rows it changed (SQLite `changes()`). Not `rowsWritten`, which also counts
+   * index entries, so an UPDATE of one row on an indexed table reports more than 1.
+   */
   run(sql: string, ...params: SqlValue[]): number;
 }
 
@@ -46,7 +49,10 @@ function makeTx(sql: SqlStorage): Tx {
       if (rows.length > 1) throw new TxDefect(`expected at most one row, got ${rows.length}: ${q.slice(0, 80)}`);
       return rows[0];
     },
-    run: (q: string, ...p: SqlValue[]) => sql.exec(q, ...p).rowsWritten,
+    run: (q: string, ...p: SqlValue[]) => {
+      sql.exec(q, ...p).toArray();
+      return sql.exec<{ n: number }>('SELECT changes() AS n').one().n;
+    },
   };
 }
 
