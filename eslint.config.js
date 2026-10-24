@@ -2,7 +2,7 @@ import tseslint from 'typescript-eslint';
 import kairos from 'eslint-plugin-kairos';
 
 export default [
-  { ignores: ['**/node_modules/**', '**/.wrangler/**', '**/dist/**', '.claude/**', 'tools/**'] },
+  { ignores: ['**/node_modules/**', '**/.wrangler/**', '**/dist/**', '.claude/**', 'tools/**', '**/routeTree.gen.ts', '**/.tanstack/**'] },
   {
     files: ['**/*.ts'],
     languageOptions: { parser: tseslint.parser, ecmaVersion: 2022, sourceType: 'module' },
