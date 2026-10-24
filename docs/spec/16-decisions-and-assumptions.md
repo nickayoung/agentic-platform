@@ -47,8 +47,8 @@
 | D-40 | Strikes expire after `strike_window` (default 90 days) and can be removed by managers | Members aren't gated forever (review G-10) |
 | D-41 | A pending, validated substitute proposal defers the unstaffed check to `min(expires_at, start − 30m)`. Substitute proposals expire at `min(start − 30m, now + 2h)` | A found substitute isn't thrown away (review G-07) |
 | D-42 | `max_hours`, `max_assignments` and `max_consecutive_days` count all of the person's work by default (`counts: all_work`) | Labour limits cover teaching plus desk work (review G-08) |
-| D-44 | **Events that span domains run natively only for owned domains.** When Kairos cancels a class whose bookings it doesn't own (Phase 3), it pushes the class cancel. BookingVendor cancels, refunds and notifies its bookings, and Kairos mirrors the result. A failed push raises an urgent manager task (§3A.1 C4, §3A.9.4). **Assumed, not confirmed** (DQ-1) | Kairos never writes another system's records; the system that holds the money and the member relationship acts on them (review H-01) |
-| D-45 | The Dumbo desk has **2 lanes**, like the other desks, so opening and closing shifts can overlap at handover. **Assumed, not confirmed** (DQ-2; placeholder, Q-17) | With 1 lane, hard coverage at Dumbo is infeasible (review H-02) |
+| D-44 | **Events that span domains run natively only for owned domains.** When Kairos cancels a class whose bookings it doesn't own (Phase 3), it pushes the class cancel. BookingVendor cancels, refunds and notifies its bookings, and Kairos mirrors the result. A failed push raises an urgent manager task (§3A.1 C4, §3A.9.4). **Confirmed** by the product owner: BookingVendor refunds bookings when a class is cancelled (DQ-1). Whether BookingVendor also notifies members is still A-15 | Kairos never writes another system's records; the system that holds the money and the member relationship acts on them (review H-01) |
+| D-45 | The Dumbo desk has **2 lanes**, like the other desks, so opening and closing shifts can overlap at handover. **Confirmed** by the tenant: two people can work the Dumbo desk at once (DQ-2) | With 1 lane, hard coverage at Dumbo is infeasible (review H-02) |
 | D-46 | `min_rest` takes optional `from` / `to` template-tag scopes (schema 2.1). `desk_rest` is 10 h from a `closing` to the next `opening` shift. **Assumed, not confirmed** (DQ-3) | The owner's rule is close → open, not between any two pieces of work (review H-03) |
 | D-47 | Desk shifts go **mirror → shadow (14 days) → owner** in Phase 1, like every other domain. **Assumed, not confirmed** (DQ-4) | One cutover rule for all domains (review H-05) |
 | D-48 | `refund.late` (schema 2.1): `none` or `as_timely_if_refilled`, default `none`. The reference tenant uses `none`. `waive_if` cancels penalties only; it never decides refunds. **Assumed, not confirmed** (DQ-5, Q-18) | The owner promised refunds only for timely cancels (review H-09) |
@@ -83,8 +83,8 @@
 | A-12 | Edge clocks are within ±1 s | Hold margins absorb ±5 s |
 | A-13 | A TypeScript CEL library passes the conformance subset, or the profile is built in house | Phase 0 schedule risk |
 | A-14 | Kairos's own commercial plans and billing for tenants are out of scope for this spec | A separate billing spec |
-| A-15 | BookingVendor's API can cancel a class. When a class is cancelled, BookingVendor cancels its bookings, refunds them under its own rules and notifies the members | Phase 3 runs with `unstaffed.action: notify_staff`, and a manager cancels in BookingVendor; the urgent task flow is reused |
-| A-16 | The physical Dumbo desk can seat two people during a handover (D-45) | Change the Dumbo `starts` so its shifts don't overlap (for example a single 13.5 h template), or accept a coverage gap |
+| A-15 | When a class is cancelled through BookingVendor's API, BookingVendor also **notifies the members**. (Cancelling the bookings and refunding them is confirmed, D-44.) | Change `no_sub_notice` to `scope: all` for Phase 3 only, so Kairos texts the members of mirrored bookings; remove it at the bookings cutover |
+| A-16 | *(Resolved: confirmed by the tenant; now D-45.)* | — |
 
 ## 16.3 Review findings addressed in v2.0
 
@@ -135,12 +135,12 @@ Section references in 16.3 and 16.4 point to where each fix lives in v3.0; the o
 
 ## 16.5 Third-review findings addressed (v3.0)
 
-The review is committed at `docs/reviews/review-3.md`, and the triage, change log and traces are at `docs/reviews/v3-revision.md`. The product owner confirmed the yoga-only scope (D-25) in this round. Every other decision from that review is marked **Assumed, not confirmed** above.
+The review is committed at `docs/reviews/review-3.md`, and the triage, change log and traces are at `docs/reviews/v3-revision.md`. The product owner confirmed the yoga-only scope (D-25), the Dumbo desk's two seats (D-45), and that BookingVendor refunds bookings when a class is cancelled (D-44). Every other decision from that review is marked **Assumed, not confirmed** above.
 
 | Finding | Where it is fixed |
 |---|---|
 | H-01 mixed-mode studio cancel | §3A.1 C4, §3A.2, §3A.9.4, §7.6, §7.13, §8.6 step 7, §15 Phase 3, A.4, `a4_…` Phase 3 variants, D-44, A-15 |
-| H-02 Dumbo desk lanes | §4.6, §6.3 `COVERAGE_UNCOVERABLE`, §4b.1, §15 Phase 0, D-45, Q-17 |
+| H-02 Dumbo desk lanes | §4.6, §6.3 `COVERAGE_UNCOVERABLE`, §4b.1, §15 Phase 0, D-45 (confirmed) |
 | H-03 scoped rest | §4.11 `min_rest.from/to`, §8.3, §4b.1 `desk_rest`, §6.3, D-46 |
 | H-04 broken fixtures | `a5_…` order 2, `a4_…` busy variant, A.4, A.5 |
 | H-05 shifts shadow | §18.2, §18.7 disagreement table, §18.9, §15 Phase 1, D-47 |

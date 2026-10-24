@@ -73,7 +73,7 @@ resources:
       attributes: { capacity: 28 } }
   - { key: ps_desk, type: front_desk, name: "Park Slope desk", location: park_slope, concurrency: 2 }
   - { key: wb_desk, type: front_desk, name: "Williamsburg desk", location: williamsburg, concurrency: 2 }
-  - { key: db_desk, type: front_desk, name: "Dumbo desk", location: dumbo, concurrency: 2 }   # 2 lanes for shift handovers; placeholder (Q-17)
+  - { key: db_desk, type: front_desk, name: "Dumbo desk", location: dumbo, concurrency: 2 }   # 2 lanes for shift handovers (confirmed by the tenant, D-45)
 layouts:
   - key: mats_30
     spot_type: mat

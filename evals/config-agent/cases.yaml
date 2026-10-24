@@ -37,7 +37,7 @@ cases:
       golden_ignore: ["$.access", "$.simulation", "$.timetable", "$.workflows", "$.custom_fields", "$.forms", "$.views",
                       "$.availability[?(@.key=='holidays')]", "$.tenant.fee_ceiling", "$.tenant.environment_guards",
                       "$.tenant.refund_credit_product", "$.entitlement_products[?(@.key=='refund_credit')]",
-                      "$.resources[?(@.key=='db_desk')].concurrency"]     # placeholder lane count (Q-17)
+                      "$.resources[?(@.key=='db_desk')].concurrency"]     # not stated in the Y-REF-01 prompt; the tenant confirmed 2 (D-45)
       structural:
         - { path: "$.layouts[?(@.key=='mats_30')].generate.per_row", equals: 6 }
         - { path: "$.templates[?(@.key=='hot_75')].requirements[?(@.key=='teacher')].select.skills_all", contains: hot_cert }

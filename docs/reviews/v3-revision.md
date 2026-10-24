@@ -78,7 +78,7 @@ Domain modes are stated per trace. Times are `America/New_York`.
 3. **Timetable.** 7 series with weekday and weekend RRULEs, an exdate, and a fixed `@staff:amara`. Validated by `TIMETABLE_CONFLICT` and `SERIES_OUTSIDE_HOURS`.
 4. **Terms.** `class_policy`: window 14 d at 12:00; free cancel 12 h; late penalty (credit forfeited; $10 membership fee; waived if refilled); no-show penalty ($15, a strike); `refund: {timely: full, late: none, studio_cancel: full}`; limits; approval at 3 strikes in 90 d; minimum 3 at T−2h; unstaffed T−90m; waitlist auto then offers. Schema: §4.8 (2.1 adds `late`).
 5. **Products.** Unlimited (freeze, cap 2/day), 10-pack (26 w), refund credit, intro month (first use). Schema: §4.9.
-6. **Desk.** Three rostered templates with per-day, per-studio `starts`; every desk has 2 lanes; three hard coverage rules. **Lane-aware `COVERAGE_UNCOVERABLE`:** the check script over every studio × weekday finds all intervals coverable (with 1 Dumbo lane it would fail Mon–Sat, which is the D-45 placeholder, Q-17).
+6. **Desk.** Three rostered templates with per-day, per-studio `starts`; every desk has 2 lanes; three hard coverage rules. **Lane-aware `COVERAGE_UNCOVERABLE`:** the check script over every studio × weekday finds all intervals coverable (with 1 Dumbo lane it would fail Mon–Sat; the tenant confirmed 2 seats, D-45).
 7. **Labour rules.** `desk_week` (40 h, all work), `desk_rest` (10 h **closing → opening**, `min_rest.from/to`), `teach_day`, `teach_rest`, `transfer`, fairness, continuity, preferences, stability. Schema: §4.11 (2.1).
 8. **Reactions.** 36 workflows; every required-notice event in §9.2 has one, so there's no `NOTICE_MISSING`; all `scope: owned`.
 9. **Access.** Issuers, role mappings, staff role mappings (placeholders, Q-11).
@@ -142,7 +142,7 @@ Variants, each asserted in `a4_…`:
 - **Two accept at once:** the unique index lets exactly one commit; the other gets `409 OFFER_FILLED`; one pending proposal.
 - **Ana became busy:** Ana (also `desk_staff` in this variant) is given desk_mid 16:00–20:00 at 12:06 (`201`, the proposal isn't committed). Approval at 12:15 → `RESOURCE_CONFLICT` → proposal `failed`, offer `lapsed`, outreach continues.
 - **Late accept:** a manager offers Ravi at 15:50 (expires 16:00); he accepts at 15:58 → proposal expires 17:30; at 16:30 the check defers once to 17:30 and emits `proposal.urgent` → `approval_urgent`; approved 16:45 → `scheduled`.
-- **Phase 3 (classes owner, bookings shadow):** the 16:30 session batch is identical; no booking, ledger, refund or member-notify rows; one push `gateway.booking_vendor.classes.cancel`; BookingVendor cancels and refunds (A-15); 20 mirrored cancellations arrive; shadow compares them with the dry-run studio cancel.
+- **Phase 3 (classes owner, bookings shadow):** the 16:30 session batch is identical; no booking, ledger, refund or member-notify rows; one push `gateway.booking_vendor.classes.cancel`; BookingVendor cancels and refunds (confirmed, D-44); 20 mirrored cancellations arrive; shadow compares them with the dry-run studio cancel.
 - **Phase 3, push fails:** after 3 attempts (by 16:40) `push_failed` drift → `cross_domain_alert` staff page + urgent task.
 - **Phases 1–2 (classes mirrored):** only owned desk shifts are vacated; the class claim stays; the portal links to BookingVendor.
 
@@ -187,16 +187,14 @@ Fixture `a5_…` asserts all of this. **Pass.**
 ## 5. Remaining open items
 
 **Findings only partly fixed:** none at the spec level. Two fixes rest on tenant facts that are placeholders:
-- **H-02:** the Dumbo desk lane count (2) is a placeholder (Q-17, A-16). If the tenant says 1, the config must change Dumbo's shift times, and the validator will say so.
-- **H-01:** the Phase 3 behaviour relies on BookingVendor cancelling, refunding and notifying when a class is cancelled through its API (A-15, Q-19). If it doesn't, Phase 3 runs with `unstaffed.action: notify_staff`.
+- **H-02:** resolved. The tenant confirmed 2 seats at the Dumbo desk (D-45).
+- **H-01:** BookingVendor refunding on cancel is confirmed (D-44). Only whether it also **notifies members** is still assumed (A-15, Q-19). If it doesn't, `no_sub_notice` runs with `scope: all` during Phase 3.
 - **H-12 (rollback of waitlists):** pushing Kairos waitlists back to BookingVendor depends on BookingVendor support; otherwise it degrades to manager tasks (§3A.18).
 
 **Decisions marked "Assumed, not confirmed"** (reviewer's recommended answers; no product-owner answer was supplied):
 
 | Decision | Question |
 |---|---|
-| D-44 | DQ-1: BookingVendor settles bookings when Kairos cancels a class it owns but whose bookings it doesn't |
-| D-45 | DQ-2: Dumbo desk has 2 lanes |
 | D-46 | DQ-3: `desk_rest` applies closing → opening only |
 | D-47 | DQ-4: shifts go through 14 days of shadow |
 | D-48 | DQ-5: no refund for a late-cancelled drop-in, even if refilled |
@@ -208,4 +206,4 @@ Fixture `a5_…` asserts all of this. **Pass.**
 | D-54 | DQ-11: no hours records for mirrored work |
 | D-55 | DQ-12: pay protection for any short-notice studio cancel |
 
-**Confirmed in this round:** D-25, yoga-only scope.
+**Confirmed in this round:** D-25 (yoga-only scope); D-45 (Dumbo desk seats 2); D-44 (BookingVendor cancels and refunds bookings when Kairos cancels a class).

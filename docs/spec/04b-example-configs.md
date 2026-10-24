@@ -86,7 +86,7 @@ resources:
       attributes: { capacity: 28 } }
   - { key: ps_desk, type: front_desk, name: "Park Slope desk", location: park_slope, concurrency: 2 }
   - { key: wb_desk, type: front_desk, name: "Williamsburg desk", location: williamsburg, concurrency: 2 }
-  - { key: db_desk, type: front_desk, name: "Dumbo desk", location: dumbo, concurrency: 2 }   # 2 lanes for shift handovers; placeholder (Q-17)
+  - { key: db_desk, type: front_desk, name: "Dumbo desk", location: dumbo, concurrency: 2 }   # 2 lanes for shift handovers (confirmed by the tenant, D-45)
 layouts:
   - key: mats_30
     spot_type: mat
@@ -645,7 +645,7 @@ access:
 - The `walk_in` partition is the last two mats of each layout, tagged `walk_in` (Mats 29–30 in Studio 1, 23–24 in Studio 2, 35–36 in Williamsburg). They are desk-only until 2 h before class, then go to `general`.
 - Desk shift start times (`starts`) and the directory group names are **placeholders** until the tenant confirms them (Q-11, Q-12). Each start fits inside its studio's hours on those days, and the three templates together cover every coverage pattern.
 - In Studio 1, row 1 is Mats 1–6. Mat 12 is in row 2 and is a wall mat. It is **not** front row.
-- **Desk lanes.** Opening and closing shifts overlap at handover (Dumbo weekdays 12:00–13:30, Saturdays 12:00–14:30 with the mid shift). Every desk therefore has 2 lanes. The Dumbo value is a placeholder until the tenant confirms it (Q-17, D-45). With 1 lane, `COVERAGE_UNCOVERABLE` fails validation (§6.3).
+- **Desk lanes.** Opening and closing shifts overlap at handover (Dumbo weekdays 12:00–13:30, Saturdays 12:00–14:30 with the mid shift). Every desk therefore has 2 lanes; the tenant confirmed that two people can work the Dumbo desk at once (D-45). With 1 lane, `COVERAGE_UNCOVERABLE` fails validation (§6.3).
 - **`desk_rest`** applies only from a `closing` shift to the next `opening` shift (`min_rest.from` / `to`, §4.11, D-46). An opening shift followed by an evening class or a mid shift is not restricted by it; `teach_rest` (15 min) and the no-overlap rule still apply.
 - **Refunds.** `refund.late: none`: a drop-in who cancels late gets no money back, even if the mat is refilled (D-48, Q-18). Units and the membership fee still follow `waive_if`.
 - **Workflows.** Every *required notice* event in §9.2 has a workflow, so validation reports no `NOTICE_MISSING`. All workflows use the default `scope: owned` (§9.3). So, while bookings are mirrored, member-facing workflows (`class_reminder`, `no_sub_notice`, …) send nothing, and BookingVendor keeps messaging its members (D-51). Staff-facing workflows on owned shifts run from Phase 1.
