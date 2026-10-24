@@ -304,6 +304,27 @@ export class TenantCore extends DurableObject<CoreEnv> {
     });
   }
 
+  /** Rejection by an owner or admin (§11.3). The draft is abandoned; a new draft starts from the active version. */
+  async rejectDraft(c: CallContext, id: string, expectedVersion: number, reason: string): Promise<Draft> {
+    return this.mutate(c, (tx, now) => {
+      const d = loadDraft(tx, id);
+      if (d.version !== expectedVersion) throw new KairosError('STALE_VERSION');
+      if (d.state === 'published' || d.state === 'abandoned') throw new KairosError('FORBIDDEN', { message: `draft is ${d.state}` });
+      tx.run(`UPDATE config_draft SET state = 'abandoned', version = version + 1, updated_at = ? WHERE id = ?`, now, id);
+      return { result: toDraft(loadDraft(tx, id)), audit: { action: 'config_draft.rejected', target: { type: 'config_draft', id }, before: null, after: { reason } } };
+    });
+  }
+
+  async getConfigVersion(scope: Scope, n: number): Promise<(ConfigVersionSummary & { document: JsonObject }) | null> {
+    this.enter(scope);
+    return this.db.tx((tx) => {
+      const r = tx.maybe<Record<string, SqlStorageValue>>(
+        `SELECT number, content_hash, state, effective_from, published_at, summary, rollback_of, parent_number, document
+         FROM config_version WHERE number = ?`, n);
+      return r ? { ...(r as unknown as ConfigVersionSummary), document: JSON.parse(r.document as string) as JsonObject } : null;
+    });
+  }
+
   /** Publishes an earlier version's document again as a new version (§6, principle 6: every change can be rolled back). */
   async rollbackConfig(c: CallContext, toNumber: number, summary: string): Promise<ConfigVersionSummary> {
     return this.mutate(c, (tx, now) => {

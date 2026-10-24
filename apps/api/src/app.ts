@@ -3,15 +3,17 @@
 // from the same definitions (§19.11).
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import type { TenantRecord } from '@kairos/control';
-import type { ActorRef, CallContext, Scope } from '@kairos/core';
+import type { Scope } from '@kairos/core';
 import { KairosError } from '@kairos/errors';
 import { verifySignature } from '@kairos/sync';
-import { authenticate, requireRole, sameSecret, type Principal } from './auth';
+import { authenticate, requireRole, sameSecret } from './auth';
+import { callCtx, coreStub, syncStub, type AppEnv } from './context';
+import { configRoutes } from './routes/config';
+import { errors, TenantParams } from './schemas';
 import { controlStub, type Env } from './env';
 import { problem } from './problem';
 
-type Vars = { requestId: string; tenant: TenantRecord; scope: Scope; principal: Principal };
-export type AppEnv = { Bindings: Env; Variables: Vars };
+const INBOUND_PATH = /^\/v1\/t\/[^/]+\/[^/]+\/sync\/inbound\//;
 
 // ---- tenant resolution, cached briefly per isolate -------------------------------------------------------------
 
@@ -29,27 +31,8 @@ async function resolveTenant(env: Env, slug: string): Promise<TenantRecord> {
   return t;
 }
 
-export const coreStub = (env: Env, s: Scope) =>
-  env.TENANT_CORE.get(env.TENANT_CORE.idFromName(`${s.tenant}:${s.env}`), { locationHint: 'enam' });
-export const syncStub = (env: Env, s: Scope) =>
-  env.TENANT_SYNC.get(env.TENANT_SYNC.idFromName(`${s.tenant}:${s.env}`), { locationHint: 'enam' });
-
-const INBOUND_PATH = /^\/v1\/t\/[^/]+\/[^/]+\/sync\/inbound\//;
-
-const actorOf = (p: Principal): ActorRef =>
-  p.kind === 'member' ? { type: 'member', subject: p.subject } : { type: 'staff', subject: p.subject, roles: p.roles };
-
-export const callCtx = (c: { get<K extends keyof Vars>(k: K): Vars[K] }): CallContext => ({
-  scope: c.get('scope'), actor: actorOf(c.get('principal')), requestId: c.get('requestId'),
-});
-
 // ---- schemas -----------------------------------------------------------------------------------------------------
 
-const Problem = z.object({ code: z.string(), status: z.number(), detail: z.string().optional() }).openapi('Problem');
-const TenantParams = z.object({
-  tenant_slug: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/).openapi({ param: { name: 'tenant_slug', in: 'path' } }),
-  env: z.enum(['preview', 'production']).openapi({ param: { name: 'env', in: 'path' } }),
-});
 const Flag = z.object({
   key: z.string(), enabled: z.boolean(), allow_locations: z.array(z.string()).nullable(),
   allow_roles: z.array(z.string()).nullable(), owner: z.string(), remove_by: z.string(), version: z.number().int(),
@@ -76,12 +59,6 @@ const TenantCreate = z.object({
     })),
   }),
 }).openapi('TenantCreate');
-const errors = {
-  401: { description: 'Unauthenticated', content: { 'application/problem+json': { schema: Problem } } },
-  403: { description: 'Forbidden', content: { 'application/problem+json': { schema: Problem } } },
-  404: { description: 'Not found', content: { 'application/problem+json': { schema: Problem } } },
-  409: { description: 'Conflict', content: { 'application/problem+json': { schema: Problem } } },
-} as const;
 
 // ---- app -----------------------------------------------------------------------------------------------------------
 
@@ -209,6 +186,8 @@ export function buildApp() {
       return c.json({ id: t.id, slug: t.slug, state: t.state }, 201);
     },
   );
+
+  configRoutes(app);
 
   app.doc31('/v1/openapi.json', { openapi: '3.1.0', info: { title: 'Kairos API', version: '0.1.0' } });
   return app;

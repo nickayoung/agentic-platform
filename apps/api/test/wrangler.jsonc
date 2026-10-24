@@ -3,6 +3,7 @@
   "main": "../src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.yaml"], "fallthrough": true }],
   "vars": { "ENVIRONMENT": "preview", "PLATFORM_ADMIN_TOKEN": "admin-secret", "GATEWAY_URL": "https://gateway.test/v1", "GATEWAY_SIGNING_SECRET": "gw-secret" },
   "durable_objects": {
     "bindings": [

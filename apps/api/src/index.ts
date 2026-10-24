@@ -3,7 +3,8 @@
 import { ControlPlane } from '@kairos/control';
 import { TenantCore } from '@kairos/core';
 import { TenantSync } from '@kairos/sync';
-import { buildApp, coreStub } from './app';
+import { buildApp } from './app';
+import { coreStub } from './context';
 import { controlStub, type Env } from './env';
 
 export { ControlPlane, TenantCore, TenantSync };

@@ -13,10 +13,10 @@ import type { Db } from '@kairos/db';
 export type DraftState = 'editing' | 'validated' | 'awaiting_approval' | 'published' | 'abandoned';
 
 /**
- * A JSON value crossing RPC. `unknown` types as `never` on the stub and a recursive JSON type is too deep for the
- * RPC type mapping, so payloads whose shape is checked elsewhere (by Zod) are typed loosely here.
+ * A JSON value crossing RPC. `unknown` types as `never` on the stub, and a recursive JSON type is too deep for the
+ * RPC type mapping, so payloads whose shape Zod checks elsewhere are typed shallowly here.
  */
-export type Json = any;
+export type Json = string | number | boolean | null | object;
 export type JsonObject = Record<string, Json>;
 
 export interface Draft {
