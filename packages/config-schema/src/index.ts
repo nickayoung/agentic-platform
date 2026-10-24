@@ -10,3 +10,4 @@ export { BUILTIN_FIELDS, type StaffRecord } from './validate/l2';
 export { exprFields, type ExprChecker, type ExprCheckResult, type ExprCode, type ExprContext, type ExprField, type ExprSlot } from './validate/l3';
 export { requiredNotices, type Domain, type DomainMode } from './validate/notices';
 export { celChecker } from './cel';
+export { applyJsonPatch, PatchError, type JsonPatchOp } from './patch';

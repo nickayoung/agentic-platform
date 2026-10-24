@@ -93,6 +93,9 @@ importers:
 
   apps/core:
     dependencies:
+      '@kairos/config-schema':
+        specifier: workspace:*
+        version: link:../../packages/config-schema
       '@kairos/db':
         specifier: workspace:*
         version: link:../../packages/db

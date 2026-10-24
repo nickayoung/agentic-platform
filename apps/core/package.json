@@ -13,7 +13,8 @@
   "dependencies": {
     "@kairos/db": "workspace:*",
     "@kairos/errors": "workspace:*",
-    "@kairos/scheduler": "workspace:*"
+    "@kairos/scheduler": "workspace:*",
+    "@kairos/config-schema": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.4.7",

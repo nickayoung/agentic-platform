@@ -8,6 +8,11 @@ import { KairosError } from '@kairos/errors';
 import { enqueue, outboxSource, sagaSource, Scheduler, type OutboxInput, type SagaDefinition } from '@kairos/scheduler';
 import { httpDeliver, type DeliveryEnv } from './deliver';
 import { emitEvent, type EventInput } from './events';
+import {
+  activationSource, activeVersion, hasErrors, insertVersion, loadDraft, patchDocument, readDocument, runValidation, toDraft,
+  type ConfigVersionSummary, type Draft, type JsonObject,
+} from './config';
+import type { ConfigDocument, JsonPatchOp } from '@kairos/config-schema';
 import { nextMaintenanceSlot, runMaintenance, type MaintenanceReport } from './maintenance';
 import { objectName, ScopeGuard, type Scope } from './scope';
 
@@ -84,6 +89,9 @@ export class TenantCore extends DurableObject<CoreEnv> {
           emitEvent(tx, { name: 'outbox.dead', subject: { type: 'outbox', id: row.id }, data: { topic: row.topic, target: row.target, error } }, now);
         } }),
         sagaSource(this.db, SAGAS, (id, e) => console.error(JSON.stringify({ msg: 'saga step failed', saga: id, error: String(e) }))),
+        activationSource(this.db, (tx, number, now) => {
+          emitEvent(tx, { name: 'config.activated', subject: { type: 'config_version', id: String(number) } }, now);
+        }),
       ],
       nextMaintenance: () => this.maintenanceDue(),
       onSourceError: (source, e) => console.error(JSON.stringify({ msg: 'tick source failed', source, error: String(e) })),
@@ -177,6 +185,156 @@ export class TenantCore extends DurableObject<CoreEnv> {
         audit: { action: 'flag.changed', target: { type: 'flag', id: f.key }, before: before ? toFlag(before) : null, after },
         events: [{ name: 'flag.changed', subject: { type: 'flag', id: f.key }, data: { enabled: after.enabled } }],
       };
+    });
+  }
+
+  // ---- config pipeline (§6, manual path) --------------------------------------------------------------------------
+
+  /** Starts a draft from YAML or JSON, or from the active version when neither is given. */
+  async createDraft(c: CallContext, input: { yaml: string } | { document: unknown } | null): Promise<Draft> {
+    this.enter(c.scope);
+    const fromInput = input ? readDocument(input) : null;
+    return this.mutate(c, (tx, now) => {
+      const active = activeVersion(tx);
+      const document = fromInput ?? active?.document;
+      if (!document) throw new KairosError('NOT_FOUND', { message: 'no active config to start from; pass a document' });
+      const id = `dft_${crypto.randomUUID().replaceAll('-', '')}`;
+      tx.run(
+        `INSERT INTO config_draft (id, base_number, document, state, author, created_at, updated_at)
+         VALUES (?, ?, ?, 'editing', ?, ?, ?)`,
+        id, active?.number ?? null, canonicalJson(document), canonicalJson(c.actor), now, now,
+      );
+      const d = toDraft(loadDraft(tx, id));
+      return { result: d, audit: { action: 'config_draft.created', target: { type: 'config_draft', id }, before: null, after: { base_number: d.base_number } } };
+    });
+  }
+
+  async getDraft(scope: Scope, id: string): Promise<Draft> {
+    this.enter(scope);
+    return this.db.tx((tx) => toDraft(loadDraft(tx, id)));
+  }
+
+  /** Applies JSON Patch operations (§6.1) with If-Match on the draft version. Any edit returns the draft to editing. */
+  async patchDraft(c: CallContext, id: string, ops: JsonPatchOp[], expectedVersion: number): Promise<Draft> {
+    this.enter(c.scope);
+    const current = this.db.tx((tx) => loadDraft(tx, id));
+    const document = patchDocument(JSON.parse(current.document) as ConfigDocument, ops);   // pure, outside the batch
+    return this.mutate(c, (tx, now) => {
+      const d = loadDraft(tx, id);
+      if (d.version !== expectedVersion) throw new KairosError('STALE_VERSION');
+      if (d.state === 'published' || d.state === 'abandoned') throw new KairosError('FORBIDDEN', { message: `draft is ${d.state}` });
+      const patches = JSON.parse((tx.one<{ patches: string }>('SELECT patches FROM config_draft WHERE id = ?', id)).patches) as unknown[];
+      tx.run(
+        `UPDATE config_draft SET document = ?, patches = ?, validation = NULL, impact = NULL, state = 'editing',
+           version = version + 1, updated_at = ? WHERE id = ?`,
+        canonicalJson(document), canonicalJson([...patches, ops]), now, id,
+      );
+      return { result: toDraft(loadDraft(tx, id)), audit: { action: 'config_draft.patched', target: { type: 'config_draft', id }, before: null, after: { ops } } };
+    });
+  }
+
+  /** Runs L1–L4 (L5 and L6 come with the solver and materialisation). No errors → validated. */
+  async validateDraft(c: CallContext, id: string): Promise<Draft> {
+    this.enter(c.scope);
+    const { doc, version, modes, flags } = this.db.tx((tx) => {
+      const d = loadDraft(tx, id);
+      const modeRows = tx.all<{ domain: string; mode: string }>('SELECT domain, mode FROM domain_mode');
+      const flagRows = tx.all<{ key: string }>('SELECT key FROM flag WHERE enabled = 1');
+      return {
+        doc: JSON.parse(d.document) as ConfigDocument, version: d.version,
+        modes: Object.fromEntries(modeRows.map((m) => [m.domain, m.mode])) as never,
+        flags: new Set(flagRows.map((f) => f.key)),
+      };
+    });
+    const report = runValidation(doc, { modes, flags });   // pure; may take tens of ms, so outside the batch
+    return this.mutate(c, (tx, now) => {
+      const d = loadDraft(tx, id);
+      if (d.version !== version) throw new KairosError('STALE_VERSION', { message: 'draft changed during validation' });
+      const ok = !hasErrors(report);
+      tx.run(
+        `UPDATE config_draft SET validation = ?, impact = ?, state = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+        canonicalJson(report), ok ? canonicalJson({ groups: [] }) : null, ok ? 'validated' : 'editing', now, id,
+      );
+      return {
+        result: toDraft(loadDraft(tx, id)),
+        audit: { action: 'config_draft.validated', target: { type: 'config_draft', id }, before: null, after: { ok, issues: report.issues.length } },
+      };
+    });
+  }
+
+  async submitDraft(c: CallContext, id: string, expectedVersion: number): Promise<Draft> {
+    return this.mutate(c, (tx, now) => {
+      const d = loadDraft(tx, id);
+      if (d.version !== expectedVersion) throw new KairosError('STALE_VERSION');
+      if (d.state !== 'validated') throw new KairosError('FORBIDDEN', { message: `draft is ${d.state}; validate it first` });
+      tx.run(`UPDATE config_draft SET state = 'awaiting_approval', version = version + 1, updated_at = ? WHERE id = ?`, now, id);
+      return { result: toDraft(loadDraft(tx, id)), audit: { action: 'config_draft.submitted', target: { type: 'config_draft', id }, before: null, after: {} } };
+    });
+  }
+
+  /**
+   * Approval by an owner or admin publishes the draft (§6, principle 6). The draft must be based on the version that
+   * is active now; otherwise it must be re-created from the new base.
+   */
+  async approveAndPublish(
+    c: CallContext, id: string, expectedVersion: number, opts: { effective_from?: number; summary: string },
+  ): Promise<ConfigVersionSummary> {
+    this.enter(c.scope);
+    const now = Date.now();
+    const effectiveFrom = opts.effective_from ?? now;
+    if (effectiveFrom < now - 60_000) throw new KairosError('SCHEMA_INVALID', { message: 'effective_from is in the past' });
+    return this.mutate(c, (tx, at) => {
+      const d = loadDraft(tx, id);
+      if (d.version !== expectedVersion) throw new KairosError('STALE_VERSION');
+      if (d.state !== 'awaiting_approval') throw new KairosError('FORBIDDEN', { message: `draft is ${d.state}; submit it first` });
+      const active = activeVersion(tx);
+      if ((active?.number ?? null) !== d.base_number) {
+        throw new KairosError('STALE_VERSION', { message: `draft is based on v${d.base_number}; v${active?.number} is active` });
+      }
+      const v = insertVersion(tx, {
+        document: JSON.parse(d.document) as ConfigDocument, actor: c.actor, now: at, effectiveFrom, summary: opts.summary, rollbackOf: null,
+      });
+      tx.run(`UPDATE config_draft SET state = 'published', approved_by = ?, version = version + 1, updated_at = ? WHERE id = ?`,
+        canonicalJson(c.actor), at, id);
+      return {
+        result: v,
+        audit: { action: 'config.published', target: { type: 'config_version', id: String(v.number) }, before: null, after: { ...v, draft_id: id } },
+        events: [{ name: v.state === 'active' ? 'config.activated' : 'config.staged', subject: { type: 'config_version', id: String(v.number) } }],
+      };
+    });
+  }
+
+  /** Publishes an earlier version's document again as a new version (§6, principle 6: every change can be rolled back). */
+  async rollbackConfig(c: CallContext, toNumber: number, summary: string): Promise<ConfigVersionSummary> {
+    return this.mutate(c, (tx, now) => {
+      const target = tx.maybe<{ document: string }>('SELECT document FROM config_version WHERE number = ?', toNumber);
+      if (!target) throw new KairosError('NOT_FOUND', { message: `config v${toNumber}` });
+      const v = insertVersion(tx, {
+        document: JSON.parse(target.document) as ConfigDocument, actor: c.actor, now, effectiveFrom: now, summary, rollbackOf: toNumber,
+      });
+      return {
+        result: v,
+        audit: { action: 'config.rolled_back', target: { type: 'config_version', id: String(v.number) }, before: null, after: v },
+        events: [{ name: 'config.activated', subject: { type: 'config_version', id: String(v.number) }, reason: 'rollback' }],
+      };
+    });
+  }
+
+  async listConfigVersions(scope: Scope): Promise<ConfigVersionSummary[]> {
+    this.enter(scope);
+    return this.db.tx((tx) => tx.all<ConfigVersionSummary & Record<string, SqlStorageValue>>(
+      `SELECT number, content_hash, state, effective_from, published_at, summary, rollback_of, parent_number
+       FROM config_version ORDER BY number DESC LIMIT 100`));
+  }
+
+  async getActiveConfig(scope: Scope): Promise<{ number: number; content_hash: string; epoch: number; document: JsonObject } | null> {
+    this.enter(scope);
+    return this.db.tx((tx) => {
+      const r = tx.maybe<{ number: number; content_hash: string; document: string }>(
+        `SELECT number, content_hash, document FROM config_version WHERE state = 'active'`);
+      if (!r) return null;
+      const epoch = Number(tx.maybe<{ value: string }>(`SELECT value FROM scheduler_state WHERE key = 'config_epoch'`)?.value ?? 0);
+      return { number: r.number, content_hash: r.content_hash, epoch, document: JSON.parse(r.document) as JsonObject };
     });
   }
 
